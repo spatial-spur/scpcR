@@ -1,2 +1,8 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+^\.git$
+^\.gitignore$
+^\.Rhistory$
+^\.DS_Store$
+^tests/\.DS_Store$
+^\.{1,2}Rcheck$

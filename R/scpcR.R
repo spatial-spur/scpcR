@@ -184,7 +184,7 @@
   }else{
     qmax <- 120
   }
-  
+
   c0    <- .getc0fromavc(distv, avc0)
   cmax  <- .getc0fromavc(distv, minavc)
   
@@ -245,7 +245,7 @@
   # Determine the estimation sample used in the model
   if ("fixest" %in% class(model)) {
     # fixest: use obs()
-    obs_index <- obs(model)
+    obs_index <- fixest::obs(model)
     data_used <- data[obs_index, , drop = FALSE]
   } else if ("lm" %in% class(model)) {
     # lm: use rownames from model.frame
@@ -280,9 +280,6 @@ scpc <- function(model,
   S    <- sandwich::estfun(model)
   model_mat <- model.matrix(model)
   n    <- nrow(S); p <- ncol(S); neff <- n
-  
-  coords <- as.matrix(.get_coords(model, data, coords_var))
-  if(ncol(coords) == 1) coords <- cbind(coords, 0)
 
   if(!is.null(cluster)) {
     cluster <- factor(cluster)
@@ -292,7 +289,9 @@ scpc <- function(model,
     coords  <- coords[match(unique(cluster), cluster), ]
     neff    <- nrow(S)
   }
-
+  
+  coords <- as.matrix(.get_coords(model, data, coords_var))
+  if(ncol(coords) == 1) coords <- cbind(coords, 0)
   
   ## 2. Spatial kernel (unconditional) -------------------------------
   D        <- .getdistmat(coords, latlong)

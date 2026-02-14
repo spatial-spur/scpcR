@@ -230,3 +230,198 @@ test_that("scpc validates coordinate columns and ranges", {
     "`coord_euclidean` must be a character vector with at least one column name"
   )
 })
+
+test_that("scpc supports fixest IV models (unconditional and conditional)", {
+  skip_if_not_installed("fixest")
+  skip_if_not_installed("geodist")
+  old_threads <- fixest::getFixest_nthreads()
+  fixest::setFixest_nthreads(1)
+  on.exit(fixest::setFixest_nthreads(old_threads), add = TRUE)
+
+  set.seed(102)
+  n <- 120
+  z <- stats::rnorm(n)
+  w <- stats::rnorm(n)
+  u <- stats::rnorm(n)
+  x <- 0.9 * z + 0.4 * w + 0.7 * u + stats::rnorm(n, sd = 0.2)
+  y <- 1 + 1.2 * x + 0.5 * w + u
+  dat <- data.frame(
+    y = y,
+    x = x,
+    w = w,
+    z = z,
+    lon = runif(n, -125, -66),
+    lat = runif(n, 25, 49)
+  )
+
+  fit <- fixest::feols(y ~ w | x ~ z, data = dat)
+
+  out_u <- scpc(
+    model = fit,
+    data = dat,
+    coord_euclidean = c("lon", "lat"),
+    k = 2,
+    avc = 0.1,
+    uncond = TRUE,
+    cvs = TRUE
+  )
+  out_c <- scpc(
+    model = fit,
+    data = dat,
+    lon = "lon",
+    lat = "lat",
+    k = 2,
+    avc = 0.1,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+
+  expect_s3_class(out_u, "scpc")
+  expect_s3_class(out_c, "scpc")
+  expect_equal(dim(out_u$scpcstats), c(2, 6))
+  expect_equal(dim(out_c$scpcstats), c(2, 6))
+  expect_equal(dim(out_u$scpccvs), c(2, 4))
+  expect_equal(dim(out_c$scpccvs), c(2, 4))
+  expect_true(all(is.finite(out_u$scpcstats)))
+  expect_true(all(is.finite(out_c$scpcstats)))
+})
+
+test_that("conditional SCPC for fixest FE matches lm with explicit FE dummies", {
+  skip_if_not_installed("fixest")
+  old_threads <- fixest::getFixest_nthreads()
+  fixest::setFixest_nthreads(1)
+  on.exit(fixest::setFixest_nthreads(old_threads), add = TRUE)
+
+  set.seed(2026)
+  n_fe <- 40
+  t_per_fe <- 6
+  n <- n_fe * t_per_fe
+  fe <- rep(seq_len(n_fe), each = t_per_fe)
+  x1 <- stats::rnorm(n)
+  x2 <- stats::rnorm(n)
+  alpha <- stats::rnorm(n_fe)[fe]
+  y <- 0.8 * x1 - 0.4 * x2 + alpha + stats::rnorm(n, sd = 0.7)
+  dat <- data.frame(
+    y = y,
+    x1 = x1,
+    x2 = x2,
+    fe = fe,
+    lon = runif(n, -125, -66),
+    lat = runif(n, 25, 49)
+  )
+
+  fit_fixest <- fixest::feols(y ~ x1 + x2 | fe, data = dat)
+  fit_lm <- stats::lm(y ~ x1 + x2 + factor(fe), data = dat)
+
+  out_fixest <- scpc(
+    model = fit_fixest,
+    data = dat,
+    coord_euclidean = c("lon", "lat"),
+    k = 2,
+    avc = 0.05,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+  out_lm <- scpc(
+    model = fit_lm,
+    data = dat,
+    coord_euclidean = c("lon", "lat"),
+    k = 3,
+    avc = 0.05,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+
+  stats_fixest <- as.data.frame(out_fixest$scpcstats)
+  stats_fixest$term <- rownames(out_fixest$scpcstats)
+  stats_lm <- as.data.frame(out_lm$scpcstats)
+  stats_lm$term <- rownames(out_lm$scpcstats)
+
+  merged_stats <- merge(stats_fixest, stats_lm, by = "term", suffixes = c("_fixest", "_lm"), sort = FALSE)
+  expect_equal(sort(merged_stats$term), c("x1", "x2"))
+  for (v in c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")) {
+    d <- max(abs(merged_stats[[paste0(v, "_fixest")]] - merged_stats[[paste0(v, "_lm")]]))
+    expect_true(d < 2e-4, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
+  }
+
+  cvs_fixest <- as.data.frame(out_fixest$scpccvs)
+  cvs_fixest$term <- rownames(out_fixest$scpcstats)
+  cvs_lm <- as.data.frame(out_lm$scpccvs)
+  cvs_lm$term <- rownames(out_lm$scpcstats)[seq_len(nrow(cvs_lm))]
+
+  merged_cvs <- merge(cvs_fixest, cvs_lm, by = "term", suffixes = c("_fixest", "_lm"), sort = FALSE)
+  expect_equal(sort(merged_cvs$term), c("x1", "x2"))
+  for (v in c("V1", "V2", "V3", "V4")) {
+    d <- max(abs(merged_cvs[[paste0(v, "_fixest")]] - merged_cvs[[paste0(v, "_lm")]]))
+    expect_true(d < 2e-4, info = paste("max abs diff for cvs", v, "=", format(d, scientific = TRUE)))
+  }
+})
+
+test_that("conditional SCPC for fixest absorbed FE IV matches explicit FE dummies", {
+  skip_if_not_installed("fixest")
+  old_threads <- fixest::getFixest_nthreads()
+  fixest::setFixest_nthreads(1)
+  on.exit(fixest::setFixest_nthreads(old_threads), add = TRUE)
+
+  set.seed(2027)
+  n <- 200
+  fe <- rep(seq_len(40), each = 5)
+  z <- stats::rnorm(n)
+  u <- stats::rnorm(n)
+  w <- stats::rnorm(n)
+  x <- 0.8 * z + 0.6 * u + stats::rnorm(n, sd = 0.2)
+  y <- 1 + 1.2 * x + 0.4 * w + stats::rnorm(n) + stats::rnorm(40)[fe]
+  dat <- data.frame(
+    y = y,
+    x = x,
+    z = z,
+    w = w,
+    fe = fe,
+    lon = runif(n, -125, -66),
+    lat = runif(n, 25, 49)
+  )
+
+  fit_absorbed <- fixest::feols(y ~ w | fe | x ~ z, data = dat)
+  fit_explicit <- fixest::feols(y ~ w + i(fe) | x ~ z, data = dat)
+
+  out_absorbed <- scpc(
+    model = fit_absorbed,
+    data = dat,
+    coord_euclidean = c("lon", "lat"),
+    k = 2,
+    avc = 0.1,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+  out_explicit <- scpc(
+    model = fit_explicit,
+    data = dat,
+    coord_euclidean = c("lon", "lat"),
+    k = 30,
+    avc = 0.1,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+
+  st_abs <- as.data.frame(out_absorbed$scpcstats)
+  st_abs$term <- rownames(out_absorbed$scpcstats)
+  st_exp <- as.data.frame(out_explicit$scpcstats)
+  st_exp$term <- rownames(out_explicit$scpcstats)
+  merged_stats <- merge(st_abs, st_exp, by = "term", suffixes = c("_abs", "_exp"), sort = FALSE)
+  expect_equal(sort(merged_stats$term), sort(c("fit_x", "w")))
+  for (v in c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")) {
+    d <- max(abs(merged_stats[[paste0(v, "_abs")]] - merged_stats[[paste0(v, "_exp")]]))
+    expect_true(d < 3e-4, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
+  }
+
+  cv_abs <- as.data.frame(out_absorbed$scpccvs)
+  cv_abs$term <- rownames(out_absorbed$scpcstats)
+  cv_exp <- as.data.frame(out_explicit$scpccvs)
+  cv_exp$term <- rownames(out_explicit$scpcstats)[seq_len(nrow(cv_exp))]
+  merged_cvs <- merge(cv_abs, cv_exp, by = "term", suffixes = c("_abs", "_exp"), sort = FALSE)
+  expect_equal(sort(merged_cvs$term), sort(c("fit_x", "w")))
+  for (v in c("V1", "V2", "V3", "V4")) {
+    d <- max(abs(merged_cvs[[paste0(v, "_abs")]] - merged_cvs[[paste0(v, "_exp")]]))
+    expect_true(d < 3e-4, info = paste("max abs diff for cvs", v, "=", format(d, scientific = TRUE)))
+  }
+})

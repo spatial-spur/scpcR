@@ -100,6 +100,10 @@ prepare_data <- function(data_path, scenario) {
   d <- d[keep, , drop = FALSE]
   rownames(d) <- seq_len(nrow(d))
 
+  if (isTRUE(scenario$include_fe)) {
+    d$fe <- (seq_len(nrow(d)) - 1L) %% 20L + 1L
+  }
+
   if (identical(scenario$cluster_mode, "pair_mean")) {
     d$clust_id <- ceiling(seq_len(nrow(d)) / 2)
     d$lat <- ave(d$lat, d$clust_id, FUN = mean)
@@ -185,7 +189,11 @@ stata_export_helpers <- function(out_stats_path, out_cvs_path, write_cvs) {
 
 run_stata_scenario <- function(stata_bin, data_path, scenario, out_stats_path, out_cvs_path) {
   drop_expr <- paste(sprintf("missing(%s)", c(scenario$dep, scenario$rhs, "lat", "lon")), collapse = " | ")
-  rhs <- paste(scenario$rhs, collapse = " ")
+  rhs_terms <- scenario$rhs
+  if (isTRUE(scenario$include_fe)) {
+    rhs_terms <- c(rhs_terms, "i.fe")
+  }
+  rhs <- paste(rhs_terms, collapse = " ")
 
   reg_line <- if (identical(scenario$cluster_mode, "pair_mean")) {
     sprintf("regress %s %s, cluster(clust_id)", scenario$dep, rhs)
@@ -221,6 +229,7 @@ run_stata_scenario <- function(stata_bin, data_path, scenario, out_stats_path, o
     sprintf("import delimited \"%s\", varnames(1) clear", data_path),
     "rename *, lower",
     sprintf("drop if %s", drop_expr),
+    if (isTRUE(scenario$include_fe)) "gen long fe = mod(_n - 1, 20) + 1",
     if (identical(scenario$cluster_mode, "pair_mean")) "gen long clust_id = ceil(_n/2)",
     if (identical(scenario$cluster_mode, "pair_mean")) "bysort clust_id: egen s_1 = mean(lat)",
     if (identical(scenario$cluster_mode, "pair_mean")) "bysort clust_id: egen s_2 = mean(lon)",
@@ -251,6 +260,9 @@ run_stata_scenario <- function(stata_bin, data_path, scenario, out_stats_path, o
 run_r_scenario <- function(data_path, scenario, out_stats_path, out_cvs_path) {
   d <- prepare_data(data_path, scenario)
   rhs <- paste(scenario$rhs, collapse = " + ")
+  if (isTRUE(scenario$include_fe)) {
+    rhs <- paste0(rhs, " + factor(fe)")
+  }
   form <- stats::as.formula(sprintf("%s ~ %s", scenario$dep, rhs))
   fit <- stats::lm(form, data = d)
   scpc_fun <- get_scpc_fun(data_path)
@@ -362,6 +374,18 @@ test_that("scpcR matches Stata scpc across models and options (non-clustered)", 
       id = "multivar_cond_cvs",
       dep = "am",
       rhs = c("tlfpr", "fracblack", "gini"),
+      latlong = TRUE,
+      uncond = FALSE,
+      avc = 0.03,
+      k = 3L,
+      cvs = TRUE,
+      cluster_mode = "none"
+    ),
+    list(
+      id = "fe_cond_latlong",
+      dep = "am",
+      rhs = c("tlfpr", "fracblack", "gini"),
+      include_fe = TRUE,
       latlong = TRUE,
       uncond = FALSE,
       avc = 0.03,
@@ -494,4 +518,124 @@ test_that("clustered pair-mean scenario matches Stata", {
   s_cvs$term[s_cvs$term == "_cons"] <- "(Intercept)"
   r_cvs_tab <- read.csv(r_cvs, stringsAsFactors = FALSE, check.names = FALSE)
   assert_cvs_close(s_cvs, r_cvs_tab, tol = 2e-4)
+})
+
+test_that("absorbed FE IV conditional SCPC matches Stata ivregress with i.fe", {
+  skip_on_cran()
+  skip_if_not_installed("fixest")
+  old_threads <- fixest::getFixest_nthreads()
+  fixest::setFixest_nthreads(1)
+  on.exit(fixest::setFixest_nthreads(old_threads), add = TRUE)
+
+  data_path <- resolve_data_path()
+  skip_if(is.na(data_path), "Missing chetty_data_1.csv in repository base.")
+
+  stata_bin <- find_stata_binary()
+  skip_if(is.na(stata_bin), "Stata binary not found.")
+  skip_if_not(stata_has_scpc(stata_bin), "Stata scpc command not installed.")
+
+  tmpdir <- tempfile("scpc_stata_iv_fe_")
+  dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(tmpdir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  stata_stats <- file.path(tmpdir, "stata_stats_iv_fe.csv")
+  stata_cvs <- file.path(tmpdir, "stata_cvs_iv_fe.csv")
+
+  lines <- c(
+    "clear all",
+    "set more off",
+    sprintf("import delimited \"%s\", varnames(1) clear", data_path),
+    "rename *, lower",
+    "drop if missing(am) | missing(fracblack) | missing(tlfpr) | missing(gini) | missing(lat) | missing(lon)",
+    "gen long fe = mod(_n - 1, 20) + 1",
+    "gen double u_det = sin(_n / 7)",
+    "gen double v_det = cos(_n / 11)",
+    "gen double z_iv = tlfpr + 0.25*fracblack + 0.1*v_det",
+    "gen double x_endog = 0.6*z_iv + 0.1*gini + 0.2*u_det",
+    "gen s_1 = lat",
+    "gen s_2 = lon",
+    "ivregress 2sls am fracblack i.fe (x_endog = z_iv), robust",
+    "scpc, latlong avc(0.03) k(2) cvs",
+    stata_export_helpers(stata_stats, stata_cvs, write_cvs = TRUE)
+  )
+
+  stata_res <- run_stata_do(stata_bin, lines)
+  failed <- stata_res$status != 0L || !file.exists(stata_stats) || !file.exists(stata_cvs)
+  if (failed) {
+    log_tail <- ""
+    if (!is.na(stata_res$log_file) && file.exists(stata_res$log_file)) {
+      lg <- readLines(stata_res$log_file, warn = FALSE)
+      log_tail <- paste(utils::tail(lg, 80), collapse = "\n")
+    }
+    unlink(c(stata_res$do_file, stata_res$log_files))
+    stop(paste("Stata IV+FE scenario failed:", log_tail), call. = FALSE)
+  }
+  unlink(c(stata_res$do_file, stata_res$log_files))
+
+  d <- read.csv(data_path, stringsAsFactors = FALSE, check.names = FALSE)
+  names(d) <- tolower(names(d))
+  keep <- stats::complete.cases(d[, c("am", "fracblack", "tlfpr", "gini", "lat", "lon"), drop = FALSE])
+  d <- d[keep, , drop = FALSE]
+  rownames(d) <- seq_len(nrow(d))
+  d$fe <- (seq_len(nrow(d)) - 1L) %% 20L + 1L
+  d$u_det <- sin(seq_len(nrow(d)) / 7)
+  d$v_det <- cos(seq_len(nrow(d)) / 11)
+  d$z_iv <- d$tlfpr + 0.25 * d$fracblack + 0.1 * d$v_det
+  d$x_endog <- 0.6 * d$z_iv + 0.1 * d$gini + 0.2 * d$u_det
+
+  fit_r <- fixest::feols(am ~ fracblack | fe | x_endog ~ z_iv, data = d)
+  out_r <- scpc(
+    model = fit_r,
+    data = d,
+    lon = "lon",
+    lat = "lat",
+    avc = 0.03,
+    k = 2,
+    uncond = FALSE,
+    cvs = TRUE
+  )
+
+  r_stats <- as.data.frame(out_r$scpcstats)
+  r_stats$term <- rownames(out_r$scpcstats)
+  rownames(r_stats) <- NULL
+  names(r_stats) <- c("coef", "std_err", "t", "p", "ci_low", "ci_high", "term")
+  r_stats$term <- sub("^fit_", "", r_stats$term)
+  r_stats <- r_stats[, c("term", "coef", "std_err", "t", "p", "ci_low", "ci_high")]
+
+  r_cvs <- as.data.frame(out_r$scpccvs)
+  names(r_cvs) <- c("cv32", "cv10", "cv5", "cv1")
+  r_cvs$term <- sub("^fit_", "", rownames(out_r$scpcstats)[seq_len(nrow(r_cvs))])
+  r_cvs <- r_cvs[, c("term", "cv32", "cv10", "cv5", "cv1")]
+
+  s_stats <- read_stata_scpcstats(stata_stats)
+  s_cvs <- read.csv(stata_cvs, stringsAsFactors = FALSE, check.names = FALSE)
+
+  terms_target <- c("x_endog", "fracblack")
+  s_stats <- s_stats[s_stats$term %in% terms_target, , drop = FALSE]
+  r_stats <- r_stats[r_stats$term %in% terms_target, , drop = FALSE]
+  expect_equal(sort(s_stats$term), sort(terms_target))
+  expect_equal(sort(r_stats$term), sort(terms_target))
+  merged_stats <- merge(s_stats, r_stats, by = "term", suffixes = c("_stata", "_r"), sort = FALSE)
+  tol_by_var <- c(
+    coef = 1e-3,
+    std_err = 1e-3,
+    t = 1e-4,
+    p = 2e-3,
+    ci_low = 0.5,
+    ci_high = 0.5
+  )
+  for (v in names(tol_by_var)) {
+    d <- max(abs(merged_stats[[paste0(v, "_stata")]] - merged_stats[[paste0(v, "_r")]]))
+    expect_true(d < tol_by_var[[v]], info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
+  }
+
+  s_cvs <- s_cvs[s_cvs$term %in% terms_target, , drop = FALSE]
+  r_cvs <- r_cvs[r_cvs$term %in% terms_target, , drop = FALSE]
+  expect_equal(sort(s_cvs$term), sort(terms_target))
+  expect_equal(sort(r_cvs$term), sort(terms_target))
+  merged_cvs <- merge(s_cvs, r_cvs, by = "term", suffixes = c("_stata", "_r"), sort = FALSE)
+  for (v in c("cv32", "cv10", "cv5", "cv1")) {
+    d <- max(abs(merged_cvs[[paste0(v, "_stata")]] - merged_cvs[[paste0(v, "_r")]]))
+    expect_true(d < 0.12, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
+  }
 })

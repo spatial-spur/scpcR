@@ -161,14 +161,21 @@
 
 
 # Orthogonalisation helper (needed for conditional version)
-.orthogonalize_W <- function(W, xj, xjs, model_mat) {
+.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL) {
   Wx <- W
   Wx[, 1] <- Wx[, 1] * xj * xjs
 
   if (ncol(Wx) > 1L) {
-    X <- cbind("(Intercept)" = 1, as.matrix(model_mat))
+    X <- as.matrix(model_mat)
+    has_intercept_col <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
+    if (isTRUE(include_intercept) && !has_intercept_col) {
+      X <- cbind("(Intercept)" = 1, X)
+    }
     qrX <- qr(X)
     Rx <- sweep(Wx[, -1, drop = FALSE], 1, xjs, `*`)
+    if (!is.null(fixef_id)) {
+      Rx <- as.matrix(fixest::demean(Rx, f = fixef_id, nthreads = 1L))
+    }
     Rr <- qr.resid(qrX, Rx)
     Wx[, -1] <- sweep(Rr, 1, xj, `*`)
   }
@@ -273,6 +280,62 @@
   obs_index
 }
 
+.get_scpc_model_matrix <- function(model) {
+  # For fixest IV stage 2 objects, use projected regressors in the
+  # conditional branch.
+  if ("fixest" %in% class(model) && isTRUE(model$iv) && isTRUE(model$iv_stage == 2)) {
+    mm <- tryCatch(
+      getFromNamespace("model.matrix.fixest", "fixest")(model, type = "iv.rhs2"),
+      error = function(e) NULL
+    )
+    if (!is.null(mm)) {
+      return(mm)
+    }
+  }
+  stats::model.matrix(model)
+}
+
+.has_fixest_fe <- function(model) {
+  "fixest" %in% class(model) &&
+    !is.null(model$fixef_vars) &&
+    length(model$fixef_vars) > 0L
+}
+
+.get_conditional_projection_setup <- function(model, model_mat, n, uncond) {
+  setup <- list(model_mat = as.matrix(model_mat), include_intercept = TRUE, fixef_id = NULL)
+  if (isTRUE(uncond) || !("fixest" %in% class(model)) || !.has_fixest_fe(model)) {
+    return(setup)
+  }
+
+  mm <- as.matrix(model_mat)
+  coef_names <- names(stats::coef(model))
+  if (!is.null(colnames(mm)) && all(coef_names %in% colnames(mm))) {
+    mm <- mm[, coef_names, drop = FALSE]
+  } else if (ncol(mm) == length(coef_names)) {
+    colnames(mm) <- coef_names
+  } else {
+    stop(
+      "Could not align demeaned fixest regressors with model coefficients ",
+      "(coef count = ", length(coef_names), ", demeaned columns = ", ncol(mm), ")."
+    )
+  }
+
+  if (nrow(mm) != n) {
+    stop("Internal error: fixest conditional regressors have incompatible row count.")
+  }
+
+  # Equivalent to conditioning on explicit FE dummies in the auxiliary
+  # regressions, while avoiding dummy expansion.
+  mm <- tryCatch(
+    as.matrix(fixest::demean(mm, f = model$fixef_id, nthreads = 1L)),
+    error = function(e) e
+  )
+  if (inherits(mm, "error")) {
+    stop("Could not FE-demean conditional regressors for fixest model: ", conditionMessage(mm))
+  }
+  list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
+}
+
 .resolve_coords_input <- function(data, obs_index, lon, lat, coord_euclidean) {
   use_geodesic <- !is.null(lon) || !is.null(lat)
   use_euclidean <- !is.null(coord_euclidean)
@@ -348,21 +411,39 @@ scpc <- function(model,
   
   ## 1. Influence functions ------------------------------------------
   S    <- sandwich::estfun(model)
-  model_mat <- stats::model.matrix(model)
+  model_mat <- .get_scpc_model_matrix(model)
   n    <- nrow(S); p <- ncol(S); neff <- n
+  if (nrow(model_mat) != n) {
+    stop("Model matrix row count does not match score matrix row count.")
+  }
+
+  cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
+  model_mat_cond <- cond_setup$model_mat
+  cond_include_intercept <- cond_setup$include_intercept
+  cond_fixef_id <- cond_setup$fixef_id
+  if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
+    stop(
+      "Conditional projection matrix dimensions are incompatible with model coefficients ",
+      "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond), ", expected ", n, " x ", p, ")."
+    )
+  }
+
   obs_index <- .get_obs_index(model, data)
   coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coord_euclidean)
   coords <- coord_info$coords
   latlong <- coord_info$latlong
 
   if(!is.null(cluster)) {
+    if (!is.null(cond_fixef_id) && !isTRUE(uncond)) {
+      stop("Conditional SCPC with absorbed fixed effects and external clustering is not yet implemented; use `uncond = TRUE`.")
+    }
     if(length(cluster) == nrow(data)) {
       cluster <- cluster[obs_index]
     }
     cluster <- factor(cluster)
     if(length(cluster) != n) stop("cluster length mismatch")
     S       <- rowsum(S, cluster)
-    model_mat <- rowsum(model_mat, cluster)
+    model_mat_cond <- rowsum(model_mat_cond, cluster)
     coords  <- coords[match(unique(cluster), cluster), ]
     neff    <- nrow(S)
   }
@@ -391,7 +472,7 @@ scpc <- function(model,
   
   for(j in seq_len(k_use)) {
     ## coefficient-specific score & pseudo-outcome
-    xj      <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat))      # scpc_x
+    xj      <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))      # scpc_x
     #xj_norm <- xj / sqrt(sum(xj^2))                           # scpc_xs
     xjs <- sign(xj)
     wj      <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]  # scpc w-vector
@@ -404,7 +485,11 @@ scpc <- function(model,
     
     ## conditional branch (skip when uncond=TRUE) --------------------
     if(!uncond) {
-      Wx      <- .orthogonalize_W(Wfin, xj, xjs, model_mat)
+      Wx      <- .orthogonalize_W(
+        Wfin, xj, xjs, model_mat_cond,
+        include_intercept = cond_include_intercept,
+        fixef_id = cond_fixef_id
+      )
       Omsx    <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
       p_c     <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx     <- .getcv(Omsx, q, 0.05)

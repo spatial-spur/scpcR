@@ -1,0 +1,29 @@
+bibentry(
+  bibtype  = "Article",
+  title    = "Spatial Correlation Robust Inference",
+  author   = c(
+    person("Ulrich K.", "Mueller"),
+    person("Mark W.", "Watson")
+  ),
+  journal  = "Econometrica",
+  year     = "2022",
+  volume   = "90",
+  number   = "6",
+  pages    = "2901--2935",
+  doi      = "10.3982/ECTA19465"
+)
+
+bibentry(
+  bibtype  = "Article",
+  title    = "Spatial Correlation Robust Inference in Linear Regression and Panel Models",
+  author   = c(
+    person("Ulrich K.", "Mueller"),
+    person("Mark W.", "Watson")
+  ),
+  journal  = "Journal of Business & Economic Statistics",
+  year     = "2023",
+  volume   = "41",
+  number   = "4",
+  pages    = "1050--1064",
+  doi      = "10.1080/07350015.2022.2127737"
+)

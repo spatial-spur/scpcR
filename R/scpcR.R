@@ -1,127 +1,146 @@
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 .getavc <- function(c, dist) {
-  ## computes average correlation given vector of pairwise distances
+  ## Average pairwise correlation for exponential kernel parameter c
   mean(exp(-c * dist))
 }
 
 .getdistmat <- function(S, latlong) {
-  ## computes matrix of distances from locations
-  ## if external latlong=0, distances computed as norm, otherwise latitude / longitude 
-  ## and haversine formula for sphere with radius 1/Pi
+  ## Distance matrix from coordinates.
+  ## latlong = TRUE: haversine distances in units of pi * R_earth.
+  ## latlong = FALSE: Euclidean distances.
   S <- as.matrix(S)
-  n <- nrow(S)
-  if(latlong) {
-    if(!requireNamespace("geodist", quietly = TRUE))
+  if (latlong) {
+    if (ncol(S) != 2L) {
+      stop("Internal error: geodesic coordinates must have exactly two columns.")
+    }
+    if (!requireNamespace("geodist", quietly = TRUE))
       stop("Install package 'geodist' for lat/long distances.")
-    D <- geodist::geodist(S, measure="haversine") / (2 * pi * 6378137)      #  → units πR⊕
+    S <- as.data.frame(S)
+    names(S) <- c("lon", "lat")
+    D <- geodist::geodist(S, measure = "haversine") / (2 * pi * 6378137)
   } else {
-    D <- as.matrix(stats::dist(S, diag = TRUE, upper = TRUE))  # Euclidean
+    D <- as.matrix(stats::dist(S, diag = TRUE, upper = TRUE))
   }
   D
 }
 
 .lvech <- function(mat) {
-  ## takes lower triangular part of matrix and puts it into vector
+  ## Lower-triangular elements as a vector
   mat[lower.tri(mat)]
 }
 
 .demeanmat <- function(mat) {
-  ## demeans matrix
+  ## Double-demean a matrix (row and column means removed)
   mat <- mat - rowMeans(mat)
   mat <- mat - matrix(colMeans(mat), nrow(mat), ncol(mat), byrow = TRUE)
-  return(mat)
+  mat
 }
 
 .getc0fromavc <- function(dist, avc0) {
-  ## solves for c0 from vector of pairwise distances given avc0
+  ## Solve for exponential kernel parameter c0 such that
+  ## mean(exp(-c0 * dist)) == avc0, using bisection.
   c0 <- c1 <- 10
-  while(.getavc(c0, dist) < avc0) {
+  while (.getavc(c0, dist) < avc0) {
     c1 <- c0
     c0 <- 0.5 * c0
   }
-  while(.getavc(c1,dist) > avc0 & c1 < 5000){
+  while (.getavc(c1, dist) > avc0 & c1 < 5000) {
     c0 <- c1
     c1 <- 2 * c1
   }
-  repeat{
+  repeat {
     c <- sqrt(c0 * c1)
-    if(.getavc(c, dist) > avc0) c0 <- c else c1 <- c
-    if(c1 - c0 < 0.001) break
+    if (.getavc(c, dist) > avc0) c0 <- c else c1 <- c
+    if (c1 - c0 < 0.001) break
   }
-  return(c)
+  c
 }
 
 .getW <- function(distmat, c0, qmax) {
-  ## computes first qmax eigenvectors of demeaned Sigma(c0) and stores them in W, 
-  ## along with column vector of ones
-  ## all columns of W are normalized to length 1
+  ## First qmax eigenvectors of demeaned Sigma(c0), prepended with
+
+  ## a normalised constant vector.  All columns have unit length.
   n <- nrow(distmat)
   Sig <- exp(-c0 * distmat)
   Sig_d <- .demeanmat(Sig)
-  if(requireNamespace("RSpectra", quietly = TRUE) && qmax < n - 1) {
+  if (requireNamespace("RSpectra", quietly = TRUE) && qmax < n - 1) {
     eig <- RSpectra::eigs_sym(Sig_d, k = qmax, which = "LM")
     V   <- eig$vectors
   } else {
     V <- eigen(Sig_d, symmetric = TRUE)$vectors[, seq_len(qmax)]
   }
-  return(cbind(rep(1, n) / sqrt(n), V))
+  cbind(rep(1, n) / sqrt(n), V)
 }
 
-.GQ <- gaussquad::legendre.quadrature.rules(40)[[40]]  # 40‑point table
-.GQx <- .GQ[, 1] * 0.5 + 0.5  # nodes, transformed to [0,1]
-.GQw <- .GQ[, 2] * 0.5        # weights, transformed to [0,1]
+#' @importFrom gaussquad legendre.quadrature.rules
+.GQ  <- gaussquad::legendre.quadrature.rules(40)[[40]]
+.GQx <- .GQ[, 1] * 0.5 + 0.5
+.GQw <- .GQ[, 2] * 0.5
 
 .getrp <- function(Om, cv) {
-  ## computes rejection probability given Om and cv; cv here is cv/sqrt(q) in notation of paper
-  Omx        <- -cv^2 * Om
-  Omx[1,  ]  <- Om[1, ]               # restore first row
-  evals      <- Re(eigen(Omx, only.values = TRUE)$values)
-  evals      <- -evals[evals < 0]/max(evals) 
-  tot        <- 0
-  for(j in seq_along(.GQx)) {
+  ## Rejection probability for the SCPC test given Omega matrix Om
+
+  ## and normalised critical value cv (= cv/sqrt(q) in paper notation).
+  ## Uses Gauss-Legendre quadrature over the characteristic function.
+  Omx       <- -cv^2 * Om
+  Omx[1, ]  <- Om[1, ]
+  evals_raw <- Re(eigen(Omx, only.values = TRUE)$values)
+  evals     <- -evals_raw[evals_raw < 0]
+  if (!length(evals)) return(0)
+  denom <- max(evals_raw)
+  if (!is.finite(denom) || denom <= 0) return(0)
+  evals <- evals / denom
+  tot   <- 0
+  for (j in seq_along(.GQx)) {
     u   <- .GQx[j]
-    den <- sqrt((1 - u^2) * exp(sum(log1p(evals / (1 - u^2)))))
-    tot <- tot + .GQw[j] / den
+    arg <- (1 - u^2) * exp(sum(log1p(evals / (1 - u^2))))
+    if (!is.finite(arg) || arg <= 0) next
+    tot <- tot + .GQw[j] / sqrt(arg)
   }
-  return(as.numeric(tot * 2 / pi))              # final probability
+  as.numeric(tot * 2 / pi)
 }
 
 .maxrp <- function(Oms, q, cv) {
-  ## computes largest rejection probability given vector of Om matrices stored in Oms given q and cv
+  ## Largest rejection probability across a list of Omega matrices
   rps <- vapply(Oms, function(Om) .getrp(Om[1:(q + 1), 1:(q + 1)], cv), 0.0)
-  return(list(max = max(rps), i = which.max(rps)))  # max rp and index
+  list(max = max(rps), i = which.max(rps))
 }
 
 .getcv <- function(Oms, q, level) {
-  ## computes (two-sided) critical value from q and Oms of given level
+  ## Two-sided critical value that controls size at the given level,
+  ## maximised over the Omega grid.
   rp <- 1
-  i <- 1
-  cv0 <- stats::qt(1 - level/2, df = q) / sqrt(q)  
-  while(rp>level) {
+  i  <- 1
+  cv0 <- stats::qt(1 - level / 2, df = q) / sqrt(q)
+  while (rp > level) {
     cv1 <- cv0
     repeat {
-      if(.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv1) > level) {
+      if (.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv1) > level) {
         cv0 <- cv1
         cv1 <- cv1 + 1 / sqrt(q)
       } else break
     }
-    while(cv1 - cv0 > 0.001 / sqrt(q)) {
+    while (cv1 - cv0 > 0.001 / sqrt(q)) {
       cv <- 0.5 * (cv0 + cv1)
-      if(.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv) > level) cv0 <- cv else cv1 <- cv
+      if (.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv) > level) cv0 <- cv else cv1 <- cv
     }
     maxrp <- .maxrp(Oms, q, cv1)
     if (maxrp$i == i) break
-    i <- maxrp$i
-    rp <- maxrp$max
+    i   <- maxrp$i
+    rp  <- maxrp$max
     cv0 <- cv1
   }
-  return(cv1 * sqrt(q))
+  cv1 * sqrt(q)
 }
 
 .setfinalW <- function(Oms, W, qmax) {
-  ## solves for optimal q and cv from Oms, stores results in W and cv
+  ## Select the optimal q (number of spatial PCs) that minimises the
+  ## expected confidence interval length under i.i.d. errors.
   cvs     <- lengths <- numeric(qmax)
-  for(q in seq_len(qmax)) {
+  for (q in seq_len(qmax)) {
     cvs[q]     <- .getcv(Oms, q, 0.05)
     lengths[q] <- cvs[q] * gamma(0.5 * (q + 1)) / (sqrt(q) * gamma(0.5 * q))
   }
@@ -130,202 +149,486 @@
 }
 
 .getnc <- function(c0, cmax, cgridfac) {
-  ## computes number of c-values in grid so that largest c is at least cmax
-  max(2, ceiling(log(cmax/c0) / log(cgridfac)))
+  ## Number of c-values in the multiplicative grid
+  max(2, ceiling(log(cmax / c0) / log(cgridfac)))
 }
 
 .getOms <- function(distmat, c0, cmax, W, cgridfac) {
-  ## computes vector of qmax x qmax Om(c) matrices from distmat, c0 and W
+  ## List of Omega(c) = W' Sigma(c) W matrices over the c-grid
   nc  <- .getnc(c0, cmax, cgridfac)
   Oms <- vector("list", nc)
   c   <- c0
-  for(i in seq_len(nc)) {
-    Oms[[i]] <- crossprod(W, exp(-c * distmat) %*% W)  # t(W) Σ(c) W
+  for (i in seq_len(nc)) {
+    Oms[[i]] <- crossprod(W, exp(-c * distmat) %*% W)
     c <- c * cgridfac
   }
-  return(Oms)
+  Oms
 }
 
 .gettau <- function(y, W) {
-  ## computes SCPC t-stat
-  return(sqrt(ncol(W)-1) * crossprod(W[, 1], y) / norm(crossprod(W[,-1], y), type="2"))
+  ## SCPC t-statistic
+  sqrt(ncol(W) - 1) * crossprod(W[, 1], y) / norm(crossprod(W[, -1], y), type = "2")
 }
 
-
-# Orthogonalisation helper (needed for conditional version)
-.orthogonalize_W <- function(W, xj, xjs, model_mat) {
+# ---------------------------------------------------------------------------
+# Orthogonalisation helper (conditional SCPC)
+# ---------------------------------------------------------------------------
+.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL) {
   Wx <- W
   Wx[, 1] <- Wx[, 1] * xj * xjs
-  for(j in 2:ncol(Wx)) {
-    rx <- Wx[, j] * xjs
-    r <- stats::residuals(stats::lm(rx ~ model_mat))
-    Wx[, j] <- r * xj
+
+  if (ncol(Wx) > 1L) {
+    X <- as.matrix(model_mat)
+    has_intercept_col <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
+    if (isTRUE(include_intercept) && !has_intercept_col) {
+      X <- cbind("(Intercept)" = 1, X)
+    }
+    qrX <- qr(X)
+    Rx <- sweep(Wx[, -1, drop = FALSE], 1, xjs, `*`)
+    if (!is.null(fixef_id)) {
+      Rx <- as.matrix(fixest::demean(Rx, f = fixef_id, nthreads = 1L))
+    }
+    Rr <- qr.resid(qrX, Rx)
+    Wx[, -1] <- sweep(Rr, 1, xj, `*`)
   }
   Wx
 }
 
 # ---------------------------------------------------------------------------
-# 3. Main spatial engine (Mata setOmsWfin)
+# Orthogonalisation helper (conditional SCPC, clustered)
+# ---------------------------------------------------------------------------
+.orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
+                                     include_intercept = TRUE) {
+  ## Construct the conditional Wx matrix for clustered SCPC following the
+
+  ## Stata set_Wx_cluster algorithm (Mueller & Watson):
+  ##   1. Within-cluster normalization of influence directions
+  ##   2. Expand cluster-level W to individual observations
+  ##   3. Orthogonalize at individual level against regressors
+  ##   4. Aggregate back to cluster level
+  ##
+  ## W:               nclust x (q+1) cluster-level spatial projection matrix
+  ## cl_vec:          factor of cluster membership (length n_individual)
+  ## xj_indiv:        numeric (length n_individual) influence function directions
+  ## model_mat_indiv: n_individual x p model matrix for projection
+  nclust <- nrow(W)
+  ncol_W <- ncol(W)
+  cl_idx <- as.integer(cl_vec)
+
+  ## Within-cluster normalization: xjs_i = xj_i / sqrt(sum_{i in g} xj_i^2)
+  xj_sq_sum <- as.numeric(rowsum(xj_indiv^2, cl_vec))
+  xjs_indiv <- xj_indiv / sqrt(xj_sq_sum[cl_idx])
+  xjs_indiv[!is.finite(xjs_indiv)] <- 0
+
+  ## Expand W from cluster level to individual level
+  W_indiv <- W[cl_idx, , drop = FALSE]
+
+  Wx <- matrix(0, nclust, ncol_W)
+
+  ## Column 1: Wx[g,1] = sum_{i in g}(W[g,1] * xjs_i * xj_i)
+  Wx[, 1] <- as.numeric(rowsum(W_indiv[, 1] * xjs_indiv * xj_indiv, cl_vec))
+
+  ## Columns > 1: orthogonalize at individual level, aggregate back
+  if (ncol_W > 1L) {
+    X <- as.matrix(model_mat_indiv)
+    has_intercept_col <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
+    if (isTRUE(include_intercept) && !has_intercept_col) {
+      X <- cbind("(Intercept)" = 1, X)
+    }
+    qrX <- qr(X)
+
+    for (col in 2:ncol_W) {
+      temp <- W_indiv[, col] * xjs_indiv
+      resid_col <- qr.resid(qrX, temp)
+      Wx[, col] <- as.numeric(rowsum(resid_col * xj_indiv, cl_vec))
+    }
+  }
+
+  Wx
+}
+
+# ---------------------------------------------------------------------------
+# Main spatial engine
 # ---------------------------------------------------------------------------
 .setOmsWfin <- function(distmat, avc0) {
-  
   n <- nrow(distmat)
   distv <- .lvech(distmat)
-  
-  cgridfac <- 1.2 # factor in c-grid for size control
-  minavc   <- 0.00001 # minimal avc value for which size control is checked
-  
-  if(avc0>=0.05){
+
+  cgridfac <- 1.2
+  minavc   <- 0.00001
+
+  if (avc0 >= 0.05) {
     qmax <- 10
-  }else if(avc0>=0.01){
+  } else if (avc0 >= 0.01) {
     qmax <- 20
-  }else if(avc0>=0.005){
+  } else if (avc0 >= 0.005) {
     qmax <- 60
-  }else{
+  } else {
     qmax <- 120
   }
-  
-  c0    <- .getc0fromavc(distv, avc0)
-  cmax  <- .getc0fromavc(distv, minavc)
-  
+
+  c0   <- .getc0fromavc(distv, avc0)
+  cmax <- .getc0fromavc(distv, minavc)
+
   repeat {
     qmax <- min(qmax, n - 1)
     W   <- .getW(distmat, c0, qmax)
     Oms <- .getOms(distmat, c0, cmax, W, cgridfac)
     fin <- .setfinalW(Oms, W, qmax)
-    if(fin$q < qmax || qmax == n - 1) break
-    qmax <- round(qmax + qmax/2)      # mimic ado’s escalation
+    if (fin$q < qmax || qmax == n - 1) break
+    qmax <- round(qmax + qmax / 2)
   }
   list(Wfin = fin$W, cvfin = fin$cv, Omsfin = Oms,
        c0 = c0, cmax = cmax)
 }
 
-# .setOmsWfin <- function(S, avc0, latlong) {
-#   ## S   = coordinates matrix (n × d)
-#   n     <- nrow(S)
-#   distmat <- .getdistmat(S, latlong)
-#   distv <- .lvech(distmat)
-#   
-#   cgridfac <- 1.2 # factor in c-grid for size control
-#   minavc   <- 0.00001 # minimal avc value for which size control is checked
-#   
-#   if(avc0>=0.05){
-#     qmax <- 10
-#   }else if(avc0>=0.01){
-#     qmax <- 20
-#   }else if(avc0>=0.005){
-#     qmax <- 60
-#   }else{
-#     qmax <- 120
-#   }
-#   
-#   c0    <- .getc0fromavc(distv, avc0)
-#   cmax  <- .getc0fromavc(distv, minavc)
-#   
-#   counter <- 0
-#   repeat {
-#     print(counter)
-#     counter <- counter + 1
-#     qmax <- min(qmax, n - 1)
-#     W   <- .getW(distmat, c0, qmax)
-#     Oms <- .getOms(distmat, c0, cmax, W, cgridfac)
-#     fin <- .setfinalW(Oms, W, qmax)
-#     if(fin$q < qmax || qmax == n - 1) break
-#     qmax <- round(qmax + qmax/2)      # mimic ado’s escalation
-#   }
-#   list(Wfin = fin$W, cvfin = fin$cv, Omsfin = Oms, c0 = c0, cmax = cmax)
-# }
-
-.get_coords <- function(model, data, coords_var) {
-  # Check if coords_var exists in data
-  if (!all(coords_var %in% names(data))) {
-    stop("Coordinate variables not found in data.")
-  }
-  
-  # Determine the estimation sample used in the model
-  if ("fixest" %in% class(model)) {
-    # fixest: use obs()
-    obs_index <- obs(model)
-    data_used <- data[obs_index, , drop = FALSE]
-  } else if ("lm" %in% class(model)) {
-    # lm: use rownames from model.frame
-    mf <- model.frame(model)
-    obs_index <- as.numeric(rownames(mf))
-    data_used <- data[obs_index, , drop = FALSE]
+.get_obs_index <- function(model, data) {
+  if (inherits(model, "fixest")) {
+    if (!requireNamespace("fixest", quietly = TRUE)) {
+      stop("Package 'fixest' is required for fixest model objects.")
+    }
+    obs_index <- fixest::obs(model)
+  } else if (inherits(model, "lm")) {
+    mf <- stats::model.frame(model)
+    rn <- rownames(mf)
+    suppressWarnings(obs_index <- as.integer(rn))
+    if (anyNA(obs_index)) {
+      obs_index <- match(rn, rownames(data))
+      if (anyNA(obs_index)) {
+        stop("Could not map lm model frame rows back to `data`.")
+      }
+    }
   } else {
     stop("Model class not supported. Provide an lm or fixest model.")
   }
-  
-  # Get coordinates for estimation sample
-  coords <- data_used[, coords_var, drop = FALSE]
+
+  if (any(obs_index < 1L | obs_index > nrow(data))) {
+    stop("Model observation indices are outside the row range of `data`.")
+  }
+  obs_index
+}
+
+.get_scpc_model_matrix <- function(model) {
+  if (inherits(model, "fixest") && isTRUE(model$iv) && isTRUE(model$iv_stage == 2)) {
+    mm <- tryCatch(
+      utils::getFromNamespace("model.matrix.fixest", "fixest")(model, type = "iv.rhs2"),
+      error = function(e) NULL
+    )
+    if (!is.null(mm)) {
+      return(mm)
+    }
+  }
+  stats::model.matrix(model)
+}
+
+.has_fixest_fe <- function(model) {
+  inherits(model, "fixest") &&
+    !is.null(model$fixef_vars) &&
+    length(model$fixef_vars) > 0L
+}
+
+.get_conditional_projection_setup <- function(model, model_mat, n, uncond) {
+  setup <- list(model_mat = as.matrix(model_mat), include_intercept = TRUE, fixef_id = NULL)
+  if (isTRUE(uncond) || !inherits(model, "fixest") || !.has_fixest_fe(model)) {
+    return(setup)
+  }
+
+  mm <- as.matrix(model_mat)
+  coef_names <- names(stats::coef(model))
+  if (!is.null(colnames(mm)) && all(coef_names %in% colnames(mm))) {
+    mm <- mm[, coef_names, drop = FALSE]
+  } else if (ncol(mm) == length(coef_names)) {
+    colnames(mm) <- coef_names
+  } else {
+    stop(
+      "Could not align demeaned fixest regressors with model coefficients ",
+      "(coef count = ", length(coef_names), ", demeaned columns = ", ncol(mm), ")."
+    )
+  }
+
+  if (nrow(mm) != n) {
+    stop("Internal error: fixest conditional regressors have incompatible row count.")
+  }
+
+  mm <- tryCatch(
+    as.matrix(fixest::demean(mm, f = model$fixef_id, nthreads = 1L)),
+    error = function(e) e
+  )
+  if (inherits(mm, "error")) {
+    stop("Could not FE-demean conditional regressors for fixest model: ", conditionMessage(mm))
+  }
+  list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
+}
+
+.resolve_coords_input <- function(data, obs_index, lon, lat, coord_euclidean) {
+  use_geodesic <- !is.null(lon) || !is.null(lat)
+  use_euclidean <- !is.null(coord_euclidean)
+
+  if (use_geodesic && use_euclidean) {
+    stop("Specify either `lon`/`lat` or `coord_euclidean`, not both.")
+  }
+  if (!use_geodesic && !use_euclidean) {
+    stop("Specify coordinates via `lon`/`lat` or `coord_euclidean`.")
+  }
+
+  if (use_geodesic) {
+    if (is.null(lon) || is.null(lat)) {
+      stop("For geodesic coordinates, provide both `lon` and `lat`.")
+    }
+    if (!is.character(lon) || length(lon) != 1L || !nzchar(lon) ||
+        !is.character(lat) || length(lat) != 1L || !nzchar(lat)) {
+      stop("`lon` and `lat` must each be a single column name.")
+    }
+    miss <- setdiff(c(lon, lat), names(data))
+    if (length(miss) > 0) {
+      stop("Coordinate variables not found in data: ", paste(miss, collapse = ", "))
+    }
+    coords <- data[obs_index, c(lon, lat), drop = FALSE]
+    if (!all(vapply(coords, is.numeric, logical(1)))) {
+      stop("`lon` and `lat` must reference numeric columns.")
+    }
+    if (any(!is.finite(as.matrix(coords)))) {
+      stop("Geodesic coordinates must be finite.")
+    }
+    if (any(coords[[lon]] < -180 | coords[[lon]] > 180)) {
+      stop("Longitude values must be in [-180, 180].")
+    }
+    if (any(coords[[lat]] < -90 | coords[[lat]] > 90)) {
+      stop("Latitude values must be in [-90, 90].")
+    }
+    return(list(coords = as.matrix(coords), latlong = TRUE))
+  }
+
+  if (!is.character(coord_euclidean) || length(coord_euclidean) < 1L) {
+    stop("`coord_euclidean` must be a character vector with at least one column name.")
+  }
+  miss <- setdiff(coord_euclidean, names(data))
+  if (length(miss) > 0) {
+    stop("Coordinate variables not found in data: ", paste(miss, collapse = ", "))
+  }
+  coords <- data[obs_index, coord_euclidean, drop = FALSE]
+  if (!all(vapply(coords, is.numeric, logical(1)))) {
+    stop("`coord_euclidean` columns must be numeric.")
+  }
+  if (any(!is.finite(as.matrix(coords)))) {
+    stop("Euclidean coordinates must be finite.")
+  }
+  list(coords = as.matrix(coords), latlong = FALSE)
 }
 
 # ---------------------------------------------------------------------------
-# 4. Public API  –  scpc()
+# Public API
 # ---------------------------------------------------------------------------
+
+#' Spatial Correlation-Robust Inference (SCPC)
+#'
+#' Compute spatial correlation-robust inference for regression coefficients
+#' using the SCPC method of Mueller and Watson (2022, 2023).
+#'
+#' @param model Fitted model object.
+#'   Currently supported: \code{\link{lm}} and \pkg{fixest}
+#'   (\code{\link[fixest]{feols}}) objects, including IV models.
+#' @param data Data frame used to fit \code{model}.  Must contain the
+#'   coordinate columns referenced by \code{lon}/\code{lat} or
+#'   \code{coord_euclidean}.
+#' @param lon Character string naming the longitude column in \code{data}.
+#'   Must be supplied together with \code{lat}.
+#' @param lat Character string naming the latitude column in \code{data}.
+#'   Must be supplied together with \code{lon}.
+#' @param coord_euclidean Character vector of one or more column names in
+#'   \code{data} for Euclidean coordinates.  Supply either
+#'   \code{lon}/\code{lat} or \code{coord_euclidean}, not both.
+#' @param cluster Optional character string naming a clustering variable
+#'   in \code{data}.  When clustering is used, coordinates are taken from
+#'   the first observation in each cluster; they should be constant
+#'   within clusters.
+#' @param ncoef Integer; number of coefficients to report.  Default
+#'   \code{NULL} reports all coefficients.
+#' @param k Deprecated alias for \code{ncoef}, retained for
+#'   compatibility with the Stata \command{scpc} command.
+#' @param avc Numeric; upper bound on the average pairwise correlation
+#'   for which size is controlled.  Must be in \code{(0.001, 0.99)}.
+#'   Default is 0.03.
+#' @param uncond Logical; if \code{TRUE}, report unconditional critical
+#'   values only (skip the conditional adjustment of Mueller and Watson
+#'   2023).  Default is \code{FALSE}.
+#' @param cvs Logical; if \code{TRUE}, include per-coefficient critical
+#'   values at the 32\%, 10\%, 5\%, and 1\% levels.  Default is
+#'   \code{FALSE}.
+#'
+#' @return An object of class \code{"scpc"} with components:
+#' \describe{
+#'   \item{\code{scpcstats}}{Matrix of coefficient estimates, SCPC standard
+#'     errors, t-statistics, p-values, and 95\% confidence interval bounds.}
+#'   \item{\code{scpccvs}}{Matrix of two-sided critical values at the 32\%,
+#'     10\%, 5\%, and 1\% levels, or \code{NULL} when \code{cvs = FALSE}.}
+#'   \item{\code{W}}{The spatial projection matrix (n x (q+1)).}
+#'   \item{\code{avc}}{The average correlation bound used.}
+#'   \item{\code{c0}}{Exponential kernel parameter corresponding to
+#'     \code{avc}.}
+#'   \item{\code{cv}}{The unconditional 5\% critical value.}
+#'   \item{\code{q}}{Number of spatial principal components selected.}
+#'   \item{\code{call}}{The matched call.}
+#' }
+#'
+#' @references
+#' Mueller, U. K. and Watson, M. W. (2022).
+#' \dQuote{Spatial Correlation Robust Inference.}
+#' \emph{Econometrica}, 90(6), 2901--2935.
+#' \doi{10.3982/ECTA19465}
+#'
+#' Mueller, U. K. and Watson, M. W. (2023).
+#' \dQuote{Spatial Correlation Robust Inference in Linear Regression and
+#' Panel Models.}
+#' \emph{Journal of Business & Economic Statistics}, 41(4), 1050--1064.
+#' \doi{10.1080/07350015.2022.2127737}
+#'
+#' @examples
+#' set.seed(42)
+#' n <- 60
+#' d <- data.frame(
+#'   y   = rnorm(n),
+#'   x   = rnorm(n),
+#'   lon = runif(n, -100, -80),
+#'   lat = runif(n, 30, 45)
+#' )
+#' fit <- lm(y ~ x, data = d)
+#'
+#' # Euclidean coordinates, unconditional
+#' out <- scpc(fit, data = d, coord_euclidean = c("lon", "lat"),
+#'             avc = 0.1, uncond = TRUE)
+#' out
+#'
+#' # Extract coefficients and confidence intervals
+#' coef(out)
+#' confint(out)
+#'
+#' @export
 scpc <- function(model,
                  data,
-                 coords_var,
+                 lon      = NULL,
+                 lat      = NULL,
+                 coord_euclidean = NULL,
                  cluster  = NULL,
-                 k        = 10,
+                 ncoef    = NULL,
                  avc      = 0.03,
-                 latlong  = FALSE,
                  uncond   = FALSE,
-                 cvs      = FALSE) {
-  
-  if(avc <= 0.001 || avc >= 0.99)
-    stop("Option avc() must be in (0.001, 0.99).")
-  
-  ## 1. Influence functions ------------------------------------------
-  S    <- sandwich::estfun(model)
-  model_mat <- model.matrix(model)
-  n    <- nrow(S); p <- ncol(S); neff <- n
-  
-  coords <- as.matrix(.get_coords(model, data, coords_var))
-  if(ncol(coords) == 1) coords <- cbind(coords, 0)
+                 cvs      = FALSE,
+                 k        = NULL) {
 
-  if(!is.null(cluster)) {
-    cluster <- factor(cluster)
-    if(length(cluster) != n) stop("cluster length mismatch")
-    S       <- rowsum(S, cluster)
-    model_mat <- rowsum(model_mat, cluster)
-    coords  <- coords[match(unique(cluster), cluster), ]
-    neff    <- nrow(S)
+  ## Resolve ncoef / k -------------------------------------------------------
+  if (!is.null(k)) {
+    if (!is.null(ncoef)) {
+      stop("Specify either `ncoef` or `k`, not both.")
+    }
+    ncoef <- k
   }
 
-  
-  ## 2. Spatial kernel (unconditional) -------------------------------
-  D        <- .getdistmat(coords, latlong)
-  spc      <- .setOmsWfin(D, avc)
-  Wfin     <- spc$Wfin; cvfin <- spc$cvfin; Omsfin <- spc$Omsfin
-  q        <- ncol(Wfin) - 1
+  if (avc <= 0.001 || avc >= 0.99)
+    stop("Option avc() must be in (0.001, 0.99).")
 
-  ## 3. Bread ---------------------------------------------------------
-  bread_inv <- sandwich::bread(model) / neff
+  ## 1. Influence functions --------------------------------------------------
+  S    <- sandwich::estfun(model)
+  model_mat <- .get_scpc_model_matrix(model)
+  n    <- nrow(S); p <- ncol(S); neff <- n
+  if (nrow(model_mat) != n) {
+    stop("Model matrix row count does not match score matrix row count.")
+  }
 
-  ## 4. Loop over k coefficients -------------------------------------
-  k_use <- min(k, p)
+  cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
+  model_mat_cond <- cond_setup$model_mat
+  cond_include_intercept <- cond_setup$include_intercept
+  cond_fixef_id <- cond_setup$fixef_id
+  if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
+    stop(
+      "Conditional projection matrix dimensions are incompatible with model coefficients ",
+      "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
+      ", expected ", n, " x ", p, ")."
+    )
+  }
+
+  obs_index <- .get_obs_index(model, data)
+  coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coord_euclidean)
+  coords  <- coord_info$coords
+  latlong <- coord_info$latlong
+
+  if (!is.null(cluster)) {
+    if (!is.character(cluster) || length(cluster) != 1L || !nzchar(cluster)) {
+      stop("`cluster` must be a single column name.")
+    }
+    if (!cluster %in% names(data)) {
+      stop("Cluster variable not found in data: ", cluster)
+    }
+    if (!is.null(cond_fixef_id) && !isTRUE(uncond)) {
+      stop("Conditional SCPC with absorbed fixed effects and external clustering is not yet implemented; use `uncond = TRUE`.")
+    }
+    cl_vec <- factor(data[[cluster]][obs_index])
+
+    ## Warn if coordinates vary within clusters
+    coord_by_cl <- rowsum(coords, cl_vec)
+    n_per_cl    <- as.numeric(table(cl_vec))
+    coord_means <- coord_by_cl / n_per_cl
+    coord_first <- coords[match(levels(cl_vec), cl_vec), , drop = FALSE]
+    if (max(abs(coord_means - coord_first)) > 1e-8) {
+      warning("Coordinates vary within clusters. The first observation's ",
+              "coordinates are used for each cluster; consider averaging ",
+              "coordinates within clusters before calling scpc().")
+    }
+
+    S              <- rowsum(S, cl_vec)
+    coords         <- coord_first
+    neff           <- nrow(S)
+  }
+
+  if (ncol(coords) == 1) coords <- cbind(coords, 0)
+
+  ## 2. Spatial kernel (unconditional) ---------------------------------------
+  D    <- .getdistmat(coords, latlong)
+  spc  <- .setOmsWfin(D, avc)
+  Wfin <- spc$Wfin; cvfin <- spc$cvfin; Omsfin <- spc$Omsfin
+  q    <- ncol(Wfin) - 1
+
+  ## 3. Bread ----------------------------------------------------------------
+  bread_inv <- sandwich::bread(model) / n
+
+  ## 4. Loop over coefficients ------------------------------------------------
+  k_use <- if (is.null(ncoef)) p else min(ncoef, p)
   out   <- matrix(NA_real_, k_use, 6)
-  cvs_mat <- if(cvs) matrix(NA_real_, k_use, 4) else NULL
-  rownames(out) <- names(stats::coef(model))[seq_len(k_use)]
-  colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")
-  
-  for(j in seq_len(k_use)) {
-    ## coefficient‑specific score & pseudo‑outcome
-    xj      <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat))      # scpc_x
-    #xj_norm <- xj / sqrt(sum(xj^2))                           # scpc_xs
-    xjs <- sign(xj)
-    wj      <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]       # scpc w‑vector
+  levs  <- c(0.32, 0.10, 0.05, 0.01)
+  cvs_mat    <- if (cvs) matrix(NA_real_, k_use, 4) else NULL
+  cvs_uncond <- if (cvs) vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0) else NULL
+  coef_names <- names(stats::coef(model))[seq_len(k_use)]
+  rownames(out) <- coef_names
+  colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
-    ## unconditional statistic --------------------------------------
-    tau_u  <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj) /
+  for (j in seq_len(k_use)) {
+    wj  <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]
+
+    ## unconditional statistic -----------------------------------------------
+    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj) /
       sqrt(sum((t(Wfin[, -1]) %*% wj)^2)))
-    SE     <- as.numeric(sqrt(sum((t(Wfin[, -1]) %*% wj)^2)) / (sqrt(q) * sqrt(neff)))
-    p_u    <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
-    
-    ## conditional branch (skip when uncond=TRUE) --------------------
-    if(!uncond) {
-      Wx      <- .orthogonalize_W(Wfin, xj, xjs, model_mat)
+    SE    <- as.numeric(sqrt(sum((t(Wfin[, -1]) %*% wj)^2)) / (sqrt(q) * sqrt(neff)))
+    p_u   <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
+
+    ## conditional branch (skip when uncond = TRUE) --------------------------
+    if (!uncond) {
+      if (!is.null(cluster)) {
+        ## Clustered conditional: individual-level orthogonalization
+        xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        Wx <- .orthogonalize_W_cluster(
+          Wfin, cl_vec, xj_indiv, model_mat_cond,
+          include_intercept = cond_include_intercept
+        )
+      } else {
+        ## Non-clustered conditional
+        xj  <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        xjs <- sign(xj)
+        Wx  <- .orthogonalize_W(
+          Wfin, xj, xjs, model_mat_cond,
+          include_intercept = cond_include_intercept,
+          fixef_id = cond_fixef_id
+        )
+      }
       Omsx    <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
       p_c     <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx     <- .getcv(Omsx, q, 0.05)
@@ -335,31 +638,27 @@ scpc <- function(model,
       p_final <- p_u
       cv      <- cvfin
     }
-    
+
     out[j, ] <- c(stats::coef(model)[j], SE, tau_u, p_final,
                   stats::coef(model)[j] - cv * SE,
                   stats::coef(model)[j] + cv * SE)
-    
-    cvs_mat[j, ] <- if(cvs) {
-      levs <- c(0.32, 0.10, 0.05, 0.01)
-      cvs_vec <- sapply(levs, function(lv) .getcv(Omsfin, q, lv))
-      if(!uncond) {
-        for(i in seq_along(cvs_vec)) {
-          cvs_vec[i] <- max(cvs_vec[i], .getcv(Omsx, q, levs[i]))
-        }
+
+    if (cvs) {
+      cvs_vec <- cvs_uncond
+      if (!uncond) {
+        cvs_cond <- vapply(levs, function(lv) .getcv(Omsx, q, lv), 0.0)
+        cvs_vec  <- pmax(cvs_vec, cvs_cond)
       }
-      cvs_vec
-    } else NULL
+      cvs_mat[j, ] <- cvs_vec
+    }
   }
-  
-  ## 5. Critical‑value table (32/10/5/1 %) when requested ------------
-  # cvs_mat <- if(cvs) {
-  #   levs <- c(0.32, 0.10, 0.05, 0.01)
-  #   res  <- sapply(levs, function(lv) .getcv(Omsfin, q, lv))
-  #   #dimnames(res) <- list("Two‑Sided", paste0(levs * 100, "%"))
-  #   res
-  # } else NULL
-  
+
+  ## Label the cvs matrix ----------------------------------------------------
+  if (!is.null(cvs_mat)) {
+    rownames(cvs_mat) <- coef_names
+    colnames(cvs_mat) <- c("32%", "10%", "5%", "1%")
+  }
+
   structure(list(
     scpcstats = out,
     scpccvs   = cvs_mat,
@@ -368,16 +667,92 @@ scpc <- function(model,
     c0        = spc$c0,
     cv        = cvfin,
     q         = q,
-    call      = match.call())
-    , class = "scpc")
+    call      = match.call()
+  ), class = "scpc")
 }
 
+# ---------------------------------------------------------------------------
+# S3 methods
+# ---------------------------------------------------------------------------
+
+#' @rdname scpc
+#' @param x An object of class \code{"scpc"}.
+#' @param \dots Further arguments (currently unused).
+#' @export
 print.scpc <- function(x, ...) {
-  cat("\nSCPC Inference (k =", nrow(x$scpcstats), ", q =", x$q, ")\n\n")
-  printCoefmat(x$scpcstats[,1:4], P.values = TRUE, has.Pvalue = TRUE)
-  if(!is.null(x$scpccvs)) {
-    cat("\nTwo‑sided critical values:\n")
+  cat("\nSCPC Inference (ncoef =", nrow(x$scpcstats), ", q =", x$q, ")\n\n")
+  stats::printCoefmat(x$scpcstats[, 1:4], P.values = TRUE, has.Pvalue = TRUE)
+  if (!is.null(x$scpccvs)) {
+    cat("\nTwo-sided critical values:\n")
     print(x$scpccvs)
   }
   invisible(x)
+}
+
+#' @rdname scpc
+#' @param object An object of class \code{"scpc"}.
+#' @export
+summary.scpc <- function(object, ...) {
+  cat("\nSCPC Inference (ncoef =", nrow(object$scpcstats), ", q =", object$q,
+      ", avc =", object$avc, ")\n\n")
+  stats::printCoefmat(object$scpcstats[, 1:4, drop = FALSE],
+                      P.values = TRUE, has.Pvalue = TRUE,
+                      signif.stars = TRUE)
+  cat("\n95% Confidence Intervals:\n")
+  print(object$scpcstats[, 5:6, drop = FALSE])
+  if (!is.null(object$scpccvs)) {
+    cat("\nTwo-sided critical values:\n")
+    print(object$scpccvs)
+  }
+  invisible(object)
+}
+
+#' @rdname scpc
+#' @export
+coef.scpc <- function(object, ...) {
+  out <- object$scpcstats[, "Coef"]
+  names(out) <- rownames(object$scpcstats)
+  out
+}
+
+#' @rdname scpc
+#' @param parm Character vector of coefficient names, or numeric indices.
+#'   Default is all coefficients.
+#' @param level Confidence level.  Only 0.95 is available unless
+#'   \code{cvs = TRUE} was used, in which case 0.68, 0.90, 0.95, and 0.99
+#'   are supported.
+#' @export
+confint.scpc <- function(object, parm = NULL, level = 0.95, ...) {
+  st  <- object$scpcstats
+  nms <- rownames(st)
+
+  if (is.null(parm)) {
+    idx <- seq_len(nrow(st))
+  } else if (is.character(parm)) {
+    idx <- match(parm, nms)
+    if (anyNA(idx)) stop("Unknown coefficient(s): ", paste(parm[is.na(idx)], collapse = ", "))
+  } else {
+    idx <- parm
+  }
+
+  avail <- c(0.68, 0.90, 0.95, 0.99)
+  avail_idx <- match(TRUE, abs(avail - level) < 1e-8)
+
+  if (abs(level - 0.95) < 1e-8) {
+    ci <- st[idx, c("2.5 %", "97.5 %"), drop = FALSE]
+  } else if (!is.null(object$scpccvs) && !is.na(avail_idx)) {
+    cv_vals <- object$scpccvs[idx, avail_idx]
+    se_vals <- st[idx, "Std_Err"]
+    co_vals <- st[idx, "Coef"]
+    ci <- cbind(co_vals - cv_vals * se_vals, co_vals + cv_vals * se_vals)
+  } else {
+    avail_msg <- "0.95"
+    if (!is.null(object$scpccvs)) avail_msg <- paste(c(avail_msg, "0.68, 0.90, 0.99"), collapse = ", ")
+    stop("Confidence level ", level, " is not available. Available levels: ", avail_msg)
+  }
+
+  pct <- format(100 * c((1 - level) / 2, 1 - (1 - level) / 2), digits = 3)
+  colnames(ci) <- paste0(pct, " %")
+  rownames(ci) <- nms[idx]
+  ci
 }

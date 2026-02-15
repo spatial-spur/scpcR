@@ -1,16 +1,27 @@
 Package: scpcR
 Type: Package
-Title: scpcR: An R Package implementing Mueller & Watsons scpc Stata command.
+Title: Spatial Correlation-Robust Inference for Regression Coefficients
 Version: 0.1.0
-Author: David Boll and Daniel Göttlich
-Maintainer: David Boll <david.boll@warwick.ac.uk>, Daniel Göttlich <daniel.goettlich@econ.uzh.ch>
-Description: Contains various functions to test for and correct spatial unit roots.
-License: ?
+Authors@R: c(
+    person("David", "Boll", email = "david.boll@warwick.ac.uk", role = c("aut", "cre")),
+    person("Daniel", "Goettlich", email = "daniel.goettlich@econ.uzh.ch", role = "aut")
+    )
+Description: Implements spatial correlation-robust procedures for
+    inference on regression coefficients using the SCPC approach of
+    Mueller and Watson (2022) <doi:10.3982/ECTA19465> and Mueller and
+    Watson (2023) <doi:10.1080/07350015.2022.2127737>.
+License: MIT + file LICENSE
+URL: https://github.com/pdavidboll/scpcR
+BugReports: https://github.com/pdavidboll/scpcR/issues
 Encoding: UTF-8
 LazyData: true
 RoxygenNote: 7.3.2
-Imports: 
-    statmod
-Suggests: 
+Imports:
+    gaussquad,
+    sandwich
+Suggests:
+    fixest,
+    geodist,
+    RSpectra,
     testthat (>= 3.0.0)
 Config/testthat/edition: 3

@@ -357,7 +357,7 @@ test_that("conditional SCPC for fixest FE matches lm with explicit FE dummies", 
 
   merged_stats <- merge(stats_fixest, stats_lm, by = "term", suffixes = c("_fixest", "_lm"), sort = FALSE)
   expect_equal(sort(merged_stats$term), c("x1", "x2"))
-  for (v in c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")) {
+  for (v in c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")) {
     d <- max(abs(merged_stats[[paste0(v, "_fixest")]] - merged_stats[[paste0(v, "_lm")]]))
     expect_true(d < 2e-4, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
   }
@@ -427,7 +427,7 @@ test_that("conditional SCPC for fixest absorbed FE IV matches explicit FE dummie
   st_exp$term <- rownames(out_explicit$scpcstats)
   merged_stats <- merge(st_abs, st_exp, by = "term", suffixes = c("_abs", "_exp"), sort = FALSE)
   expect_equal(sort(merged_stats$term), sort(c("fit_x", "w")))
-  for (v in c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")) {
+  for (v in c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")) {
     d <- max(abs(merged_stats[[paste0(v, "_abs")]] - merged_stats[[paste0(v, "_exp")]]))
     expect_true(d < 3e-4, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
   }
@@ -469,8 +469,8 @@ test_that("confint.scpc returns 95% CI by default", {
   expect_equal(nrow(ci), 2)
   expect_equal(ncol(ci), 2)
   expect_equal(rownames(ci), c("(Intercept)", "x"))
-  expect_equal(unname(ci[, 1]), unname(out$scpcstats[, "CI_low"]))
-  expect_equal(unname(ci[, 2]), unname(out$scpcstats[, "CI_high"]))
+  expect_equal(unname(ci[, 1]), unname(out$scpcstats[, "2.5 %"]))
+  expect_equal(unname(ci[, 2]), unname(out$scpcstats[, "97.5 %"]))
 })
 
 test_that("confint.scpc supports parm subsetting", {

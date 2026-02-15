@@ -599,7 +599,7 @@ scpc <- function(model,
   cvs_uncond <- if (cvs) vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0) else NULL
   coef_names <- names(stats::coef(model))[seq_len(k_use)]
   rownames(out) <- coef_names
-  colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")
+  colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
   for (j in seq_len(k_use)) {
     wj  <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]
@@ -695,8 +695,11 @@ print.scpc <- function(x, ...) {
 summary.scpc <- function(object, ...) {
   cat("\nSCPC Inference (ncoef =", nrow(object$scpcstats), ", q =", object$q,
       ", avc =", object$avc, ")\n\n")
-  stats::printCoefmat(object$scpcstats, P.values = TRUE, has.Pvalue = TRUE,
+  stats::printCoefmat(object$scpcstats[, 1:4, drop = FALSE],
+                      P.values = TRUE, has.Pvalue = TRUE,
                       signif.stars = TRUE)
+  cat("\n95% Confidence Intervals:\n")
+  print(object$scpcstats[, 5:6, drop = FALSE])
   if (!is.null(object$scpccvs)) {
     cat("\nTwo-sided critical values:\n")
     print(object$scpccvs)
@@ -736,7 +739,7 @@ confint.scpc <- function(object, parm = NULL, level = 0.95, ...) {
   avail_idx <- match(TRUE, abs(avail - level) < 1e-8)
 
   if (abs(level - 0.95) < 1e-8) {
-    ci <- st[idx, c("CI_low", "CI_high"), drop = FALSE]
+    ci <- st[idx, c("2.5 %", "97.5 %"), drop = FALSE]
   } else if (!is.null(object$scpccvs) && !is.na(avail_idx)) {
     cv_vals <- object$scpccvs[idx, avail_idx]
     se_vals <- st[idx, "Std_Err"]

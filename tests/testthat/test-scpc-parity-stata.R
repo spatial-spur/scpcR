@@ -270,7 +270,7 @@ run_r_scenario <- function(data_path, scenario, out_stats_path, out_cvs_path) {
   args <- list(
     model = fit,
     data = d,
-    cluster = if (identical(scenario$cluster_mode, "pair_mean")) d$clust_id else NULL,
+    cluster = if (identical(scenario$cluster_mode, "pair_mean")) "clust_id" else NULL,
     uncond = scenario$uncond,
     cvs = scenario$cvs
   )
@@ -291,7 +291,7 @@ run_r_scenario <- function(data_path, scenario, out_stats_path, out_cvs_path) {
     if ("(Intercept)" %in% names(stats::coef(fit))) {
       k_adj <- k_adj + 1L
     }
-    args$k <- k_adj
+    args$ncoef <- k_adj
   }
 
   out <- do.call(scpc_fun, args)
@@ -590,7 +590,7 @@ test_that("absorbed FE IV conditional SCPC matches Stata ivregress with i.fe", {
     lon = "lon",
     lat = "lat",
     avc = 0.03,
-    k = 2,
+    ncoef = 2,
     uncond = FALSE,
     cvs = TRUE
   )

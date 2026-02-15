@@ -25,7 +25,7 @@ test_that("scpc returns expected structure for lm in geodesic mode", {
     data = dat,
     lon = "lon",
     lat = "lat",
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = TRUE
   )
@@ -44,7 +44,7 @@ test_that("scpc returns expected structure in euclidean mode", {
     model = fit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = TRUE
   )
@@ -52,7 +52,7 @@ test_that("scpc returns expected structure in euclidean mode", {
     model = fit,
     data = dat,
     coord_euclidean = "lon",
-    k = 1,
+    ncoef =1,
     avc = 0.1,
     uncond = TRUE
   )
@@ -72,7 +72,7 @@ test_that("scpc computes critical values when requested", {
     data = dat,
     lon = "lon",
     lat = "lat",
-    k = 1,
+    ncoef =1,
     avc = 0.1,
     uncond = TRUE,
     cvs = TRUE
@@ -81,7 +81,7 @@ test_that("scpc computes critical values when requested", {
     model = fit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 1,
+    ncoef =1,
     avc = 0.1,
     uncond = TRUE,
     cvs = TRUE
@@ -93,21 +93,39 @@ test_that("scpc computes critical values when requested", {
   expect_true(all(is.finite(out_euc$scpccvs)))
 })
 
-test_that("scpc supports full-length cluster vectors with missing rows", {
+test_that("scpc supports clustering with NA rows in model", {
   dat <- make_scpc_data(with_na = TRUE)
   fit <- stats::lm(y ~ x, data = dat)
-  out <- scpc(
-    model = fit,
-    data = dat,
-    coord_euclidean = c("lon", "lat"),
-    cluster = dat$cluster,
-    k = 1,
-    avc = 0.1,
-    uncond = TRUE
+  expect_warning(
+    out <- scpc(
+      model = fit,
+      data = dat,
+      coord_euclidean = c("lon", "lat"),
+      cluster = "cluster",
+      ncoef = 1,
+      avc = 0.1,
+      uncond = TRUE
+    ),
+    "Coordinates vary within clusters"
   )
 
   expect_s3_class(out, "scpc")
   expect_equal(nrow(out$scpcstats), 1)
+})
+
+test_that("cluster must be a column name string", {
+  dat <- make_scpc_data()
+  fit <- stats::lm(y ~ x, data = dat)
+  expect_error(
+    scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+         cluster = dat$cluster, avc = 0.1, uncond = TRUE),
+    "`cluster` must be a single column name"
+  )
+  expect_error(
+    scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+         cluster = "nonexistent", avc = 0.1, uncond = TRUE),
+    "Cluster variable not found in data"
+  )
 })
 
 test_that("cvs option does not change scpcstats", {
@@ -118,7 +136,7 @@ test_that("cvs option does not change scpcstats", {
     model = fit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = FALSE,
     cvs = FALSE
@@ -127,7 +145,7 @@ test_that("cvs option does not change scpcstats", {
     model = fit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = FALSE,
     cvs = TRUE
@@ -145,7 +163,7 @@ test_that("geodesic mode works with explicit custom lon/lat names", {
     data = dat,
     lon = "lon",
     lat = "lat",
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = TRUE,
     cvs = TRUE
@@ -159,7 +177,7 @@ test_that("geodesic mode works with explicit custom lon/lat names", {
     data = dat_named,
     lon = "my_longitude",
     lat = "my_latitude",
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = TRUE,
     cvs = TRUE
@@ -260,7 +278,7 @@ test_that("scpc supports fixest IV models (unconditional and conditional)", {
     model = fit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = TRUE,
     cvs = TRUE
@@ -270,7 +288,7 @@ test_that("scpc supports fixest IV models (unconditional and conditional)", {
     data = dat,
     lon = "lon",
     lat = "lat",
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = FALSE,
     cvs = TRUE
@@ -317,7 +335,7 @@ test_that("conditional SCPC for fixest FE matches lm with explicit FE dummies", 
     model = fit_fixest,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.05,
     uncond = FALSE,
     cvs = TRUE
@@ -326,7 +344,7 @@ test_that("conditional SCPC for fixest FE matches lm with explicit FE dummies", 
     model = fit_lm,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 3,
+    ncoef =3,
     avc = 0.05,
     uncond = FALSE,
     cvs = TRUE
@@ -351,7 +369,7 @@ test_that("conditional SCPC for fixest FE matches lm with explicit FE dummies", 
 
   merged_cvs <- merge(cvs_fixest, cvs_lm, by = "term", suffixes = c("_fixest", "_lm"), sort = FALSE)
   expect_equal(sort(merged_cvs$term), c("x1", "x2"))
-  for (v in c("V1", "V2", "V3", "V4")) {
+  for (v in c("32%", "10%", "5%", "1%")) {
     d <- max(abs(merged_cvs[[paste0(v, "_fixest")]] - merged_cvs[[paste0(v, "_lm")]]))
     expect_true(d < 2e-4, info = paste("max abs diff for cvs", v, "=", format(d, scientific = TRUE)))
   }
@@ -388,7 +406,7 @@ test_that("conditional SCPC for fixest absorbed FE IV matches explicit FE dummie
     model = fit_absorbed,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 2,
+    ncoef =2,
     avc = 0.1,
     uncond = FALSE,
     cvs = TRUE
@@ -397,7 +415,7 @@ test_that("conditional SCPC for fixest absorbed FE IV matches explicit FE dummie
     model = fit_explicit,
     data = dat,
     coord_euclidean = c("lon", "lat"),
-    k = 30,
+    ncoef =30,
     avc = 0.1,
     uncond = FALSE,
     cvs = TRUE
@@ -420,8 +438,109 @@ test_that("conditional SCPC for fixest absorbed FE IV matches explicit FE dummie
   cv_exp$term <- rownames(out_explicit$scpcstats)[seq_len(nrow(cv_exp))]
   merged_cvs <- merge(cv_abs, cv_exp, by = "term", suffixes = c("_abs", "_exp"), sort = FALSE)
   expect_equal(sort(merged_cvs$term), sort(c("fit_x", "w")))
-  for (v in c("V1", "V2", "V3", "V4")) {
+  for (v in c("32%", "10%", "5%", "1%")) {
     d <- max(abs(merged_cvs[[paste0(v, "_abs")]] - merged_cvs[[paste0(v, "_exp")]]))
     expect_true(d < 3e-4, info = paste("max abs diff for cvs", v, "=", format(d, scientific = TRUE)))
   }
+})
+
+# ---------------------------------------------------------------------------
+# S3 methods
+# ---------------------------------------------------------------------------
+
+test_that("coef.scpc returns named vector of coefficients", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE)
+  co <- coef(out)
+  expect_true(is.numeric(co))
+  expect_equal(length(co), 2)
+  expect_equal(names(co), c("(Intercept)", "x"))
+  expect_equal(co, stats::coef(fit), tolerance = 1e-10)
+})
+
+test_that("confint.scpc returns 95% CI by default", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE)
+  ci <- confint(out)
+  expect_equal(nrow(ci), 2)
+  expect_equal(ncol(ci), 2)
+  expect_equal(rownames(ci), c("(Intercept)", "x"))
+  expect_equal(unname(ci[, 1]), unname(out$scpcstats[, "CI_low"]))
+  expect_equal(unname(ci[, 2]), unname(out$scpcstats[, "CI_high"]))
+})
+
+test_that("confint.scpc supports parm subsetting", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE)
+  ci <- confint(out, parm = "x")
+  expect_equal(nrow(ci), 1)
+  expect_equal(rownames(ci), "x")
+})
+
+test_that("confint.scpc errors for unsupported level without cvs", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE, cvs = FALSE)
+  expect_error(confint(out, level = 0.90), "not available")
+})
+
+test_that("confint.scpc supports other levels when cvs = TRUE", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE, cvs = TRUE)
+  ci90 <- confint(out, level = 0.90)
+  ci95 <- confint(out, level = 0.95)
+  # 90% CI should be narrower than 95% CI
+  expect_true(all(ci90[, 2] - ci90[, 1] < ci95[, 2] - ci95[, 1]))
+})
+
+test_that("summary.scpc runs without error", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE)
+  expect_output(summary(out), "SCPC Inference")
+})
+
+test_that("scpccvs has proper row and column names", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              ncoef =2, avc = 0.1, uncond = TRUE, cvs = TRUE)
+  expect_equal(rownames(out$scpccvs), c("(Intercept)", "x"))
+  expect_equal(colnames(out$scpccvs), c("32%", "10%", "5%", "1%"))
+})
+
+test_that("ncoef = NULL reports all coefficients", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              avc = 0.1, uncond = TRUE)
+  expect_equal(nrow(out$scpcstats), 2)
+})
+
+test_that("k alias works for backwards compatibility", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  out <- scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+              k = 1, avc = 0.1, uncond = TRUE)
+  expect_equal(nrow(out$scpcstats), 1)
+})
+
+test_that("using both ncoef and k errors", {
+  dat <- make_scpc_data(n = 30)
+  fit <- stats::lm(y ~ x, data = dat)
+  expect_error(
+    scpc(fit, data = dat, coord_euclidean = c("lon", "lat"),
+         ncoef = 2, k = 1, avc = 0.1, uncond = TRUE),
+    "Specify either `ncoef` or `k`, not both"
+  )
 })

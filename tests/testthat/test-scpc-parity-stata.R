@@ -520,6 +520,50 @@ test_that("clustered pair-mean scenario matches Stata", {
   assert_cvs_close(s_cvs, r_cvs_tab, tol = 2e-4)
 })
 
+test_that("clustered pair-mean conditional scenario matches Stata", {
+  skip_on_cran()
+
+  data_path <- resolve_data_path()
+  skip_if(is.na(data_path), "Missing chetty_data_1.csv in repository base.")
+
+  stata_bin <- find_stata_binary()
+  skip_if(is.na(stata_bin), "Stata binary not found.")
+  skip_if_not(stata_has_scpc(stata_bin), "Stata scpc command not installed.")
+
+  sc <- list(
+    id = "cluster_pairmean_cond",
+    dep = "am",
+    rhs = c("tlfpr", "fracblack", "gini"),
+    latlong = TRUE,
+    uncond = FALSE,
+    avc = 0.03,
+    k = 3L,
+    cvs = TRUE,
+    cluster_mode = "pair_mean"
+  )
+
+  tmpdir <- tempfile("scpc_stata_cluster_cond_")
+  dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(tmpdir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  stata_stats <- file.path(tmpdir, "stata_stats_cluster_cond.csv")
+  r_stats <- file.path(tmpdir, "r_stats_cluster_cond.csv")
+  stata_cvs <- file.path(tmpdir, "stata_cvs_cluster_cond.csv")
+  r_cvs <- file.path(tmpdir, "r_cvs_cluster_cond.csv")
+
+  run_stata_scenario(stata_bin, data_path, sc, stata_stats, stata_cvs)
+  run_r_scenario(data_path, sc, r_stats, r_cvs)
+
+  s_stats <- read_stata_scpcstats(stata_stats)
+  r_stats_tab <- read.csv(r_stats, stringsAsFactors = FALSE, check.names = FALSE)
+  assert_stats_close(s_stats, r_stats_tab, tol = 2e-4)
+
+  s_cvs <- read.csv(stata_cvs, stringsAsFactors = FALSE, check.names = FALSE)
+  s_cvs$term[s_cvs$term == "_cons"] <- "(Intercept)"
+  r_cvs_tab <- read.csv(r_cvs, stringsAsFactors = FALSE, check.names = FALSE)
+  assert_cvs_close(s_cvs, r_cvs_tab, tol = 2e-4)
+})
+
 test_that("absorbed FE IV conditional SCPC matches Stata ivregress with i.fe", {
   skip_on_cran()
   skip_if_not_installed("fixest")

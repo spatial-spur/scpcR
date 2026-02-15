@@ -195,6 +195,59 @@
 }
 
 # ---------------------------------------------------------------------------
+# Orthogonalisation helper (conditional SCPC, clustered)
+# ---------------------------------------------------------------------------
+.orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
+                                     include_intercept = TRUE) {
+  ## Construct the conditional Wx matrix for clustered SCPC following the
+
+  ## Stata set_Wx_cluster algorithm (Mueller & Watson):
+  ##   1. Within-cluster normalization of influence directions
+  ##   2. Expand cluster-level W to individual observations
+  ##   3. Orthogonalize at individual level against regressors
+  ##   4. Aggregate back to cluster level
+  ##
+  ## W:               nclust x (q+1) cluster-level spatial projection matrix
+  ## cl_vec:          factor of cluster membership (length n_individual)
+  ## xj_indiv:        numeric (length n_individual) influence function directions
+  ## model_mat_indiv: n_individual x p model matrix for projection
+  nclust <- nrow(W)
+  ncol_W <- ncol(W)
+  cl_idx <- as.integer(cl_vec)
+
+  ## Within-cluster normalization: xjs_i = xj_i / sqrt(sum_{i in g} xj_i^2)
+  xj_sq_sum <- as.numeric(rowsum(xj_indiv^2, cl_vec))
+  xjs_indiv <- xj_indiv / sqrt(xj_sq_sum[cl_idx])
+  xjs_indiv[!is.finite(xjs_indiv)] <- 0
+
+  ## Expand W from cluster level to individual level
+  W_indiv <- W[cl_idx, , drop = FALSE]
+
+  Wx <- matrix(0, nclust, ncol_W)
+
+  ## Column 1: Wx[g,1] = sum_{i in g}(W[g,1] * xjs_i * xj_i)
+  Wx[, 1] <- as.numeric(rowsum(W_indiv[, 1] * xjs_indiv * xj_indiv, cl_vec))
+
+  ## Columns > 1: orthogonalize at individual level, aggregate back
+  if (ncol_W > 1L) {
+    X <- as.matrix(model_mat_indiv)
+    has_intercept_col <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
+    if (isTRUE(include_intercept) && !has_intercept_col) {
+      X <- cbind("(Intercept)" = 1, X)
+    }
+    qrX <- qr(X)
+
+    for (col in 2:ncol_W) {
+      temp <- W_indiv[, col] * xjs_indiv
+      resid_col <- qr.resid(qrX, temp)
+      Wx[, col] <- as.numeric(rowsum(resid_col * xj_indiv, cl_vec))
+    }
+  }
+
+  Wx
+}
+
+# ---------------------------------------------------------------------------
 # Main spatial engine
 # ---------------------------------------------------------------------------
 .setOmsWfin <- function(distmat, avc0) {
@@ -523,7 +576,6 @@ scpc <- function(model,
     }
 
     S              <- rowsum(S, cl_vec)
-    model_mat_cond <- rowsum(model_mat_cond, cl_vec)
     coords         <- coord_first
     neff           <- nrow(S)
   }
@@ -550,8 +602,6 @@ scpc <- function(model,
   colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "CI_low", "CI_high")
 
   for (j in seq_len(k_use)) {
-    xj  <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-    xjs <- sign(xj)
     wj  <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]
 
     ## unconditional statistic -----------------------------------------------
@@ -562,11 +612,23 @@ scpc <- function(model,
 
     ## conditional branch (skip when uncond = TRUE) --------------------------
     if (!uncond) {
-      Wx  <- .orthogonalize_W(
-        Wfin, xj, xjs, model_mat_cond,
-        include_intercept = cond_include_intercept,
-        fixef_id = cond_fixef_id
-      )
+      if (!is.null(cluster)) {
+        ## Clustered conditional: individual-level orthogonalization
+        xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        Wx <- .orthogonalize_W_cluster(
+          Wfin, cl_vec, xj_indiv, model_mat_cond,
+          include_intercept = cond_include_intercept
+        )
+      } else {
+        ## Non-clustered conditional
+        xj  <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        xjs <- sign(xj)
+        Wx  <- .orthogonalize_W(
+          Wfin, xj, xjs, model_mat_cond,
+          include_intercept = cond_include_intercept,
+          fixef_id = cond_fixef_id
+        )
+      }
       Omsx    <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
       p_c     <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx     <- .getcv(Omsx, q, 0.05)

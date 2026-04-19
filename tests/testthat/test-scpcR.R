@@ -207,6 +207,89 @@ test_that("scpc validates coordinate mode selection and avc bounds", {
     scpc(fit, data = dat, coord_euclidean = "lon", avc = 1, uncond = TRUE),
     "Option avc\\(\\) must be in \\(0.001, 0.99\\)"
   )
+  expect_error(
+    scpc(fit, data = dat, coord_euclidean = c("lon", "lat"), avc = 0.1,
+         large_n_seed = 1.5, uncond = TRUE),
+    "`large_n_seed` must be a single integer-valued number in \\[0, 2\\^32\\)\\."
+  )
+  expect_error(
+    scpc(fit, data = dat, coord_euclidean = c("lon", "lat"), avc = 0.1,
+         method = "bad", uncond = TRUE),
+    "`method` must be one of \"auto\", \"exact\", or \"approx\"\\."
+  )
+})
+
+test_that("scpc method override can force exact or approximation branches", {
+  dat_small <- make_scpc_data(n = 40)
+  fit_small <- stats::lm(y ~ x, data = dat_small)
+
+  out_auto_small <- scpc(
+    fit_small,
+    data = dat_small,
+    coord_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    uncond = TRUE
+  )
+  out_exact_small <- scpc(
+    fit_small,
+    data = dat_small,
+    coord_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "exact",
+    uncond = TRUE
+  )
+  out_approx_small <- scpc(
+    fit_small,
+    data = dat_small,
+    coord_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "approx",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+
+  expect_identical(out_auto_small$method, "exact")
+  expect_identical(out_exact_small$method, "exact")
+  expect_identical(out_approx_small$method, "approx")
+  expect_equal(out_auto_small$scpcstats, out_exact_small$scpcstats, tolerance = 1e-10)
+  expect_equal(out_auto_small$c0, out_exact_small$c0, tolerance = 1e-10)
+  expect_equal(out_auto_small$cv, out_exact_small$cv, tolerance = 1e-10)
+  expect_equal(out_auto_small$q, out_exact_small$q)
+  expect_equal(dim(out_approx_small$scpcstats), c(1, 6))
+  expect_true(all(is.finite(out_approx_small$scpcstats)))
+
+  dat_large <- make_scpc_data(n = 4500)
+  fit_large <- stats::lm(y ~ x, data = dat_large)
+
+  out_auto_large <- scpc(
+    fit_large,
+    data = dat_large,
+    coord_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+  out_approx_large <- scpc(
+    fit_large,
+    data = dat_large,
+    coord_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "approx",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+
+  expect_identical(out_auto_large$method, "approx")
+  expect_identical(out_approx_large$method, "approx")
+  expect_equal(out_auto_large$scpcstats, out_approx_large$scpcstats, tolerance = 1e-12)
+  expect_equal(out_auto_large$c0, out_approx_large$c0, tolerance = 1e-12)
+  expect_equal(out_auto_large$cv, out_approx_large$cv, tolerance = 1e-12)
+  expect_equal(out_auto_large$q, out_approx_large$q)
 })
 
 test_that("scpc validates coordinate columns and ranges", {

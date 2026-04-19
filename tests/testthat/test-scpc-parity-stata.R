@@ -338,8 +338,6 @@ assert_cvs_close <- function(stata_tab, r_tab, tol = 2e-4) {
 }
 
 test_that("scpcR matches Stata scpc across models and options (non-clustered)", {
-  skip_on_cran()
-
   data_path <- resolve_data_path()
   skip_if(is.na(data_path), "Missing chetty_data_1.csv in repository base.")
 
@@ -477,8 +475,6 @@ test_that("scpcR matches Stata scpc across models and options (non-clustered)", 
 })
 
 test_that("clustered pair-mean scenario matches Stata", {
-  skip_on_cran()
-
   data_path <- resolve_data_path()
   skip_if(is.na(data_path), "Missing chetty_data_1.csv in repository base.")
 
@@ -521,8 +517,6 @@ test_that("clustered pair-mean scenario matches Stata", {
 })
 
 test_that("clustered pair-mean conditional scenario matches Stata", {
-  skip_on_cran()
-
   data_path <- resolve_data_path()
   skip_if(is.na(data_path), "Missing chetty_data_1.csv in repository base.")
 
@@ -565,7 +559,6 @@ test_that("clustered pair-mean conditional scenario matches Stata", {
 })
 
 test_that("absorbed FE IV conditional SCPC matches Stata ivregress with i.fe", {
-  skip_on_cran()
   skip_if_not_installed("fixest")
   old_threads <- fixest::getFixest_nthreads()
   fixest::setFixest_nthreads(1)
@@ -682,4 +675,86 @@ test_that("absorbed FE IV conditional SCPC matches Stata ivregress with i.fe", {
     d <- max(abs(merged_cvs[[paste0(v, "_stata")]] - merged_cvs[[paste0(v, "_r")]]))
     expect_true(d < 0.12, info = paste("max abs diff for", v, "=", format(d, scientific = TRUE)))
   }
+})
+
+test_that("large-n synthetic scenarios match Stata in both unconditional and conditional modes", {
+  stata_bin <- find_stata_binary()
+  skip_if(is.na(stata_bin), "Stata binary not found.")
+  skip_if_not(stata_has_scpc(stata_bin), "Stata scpc command not installed.")
+
+  set.seed(1)
+  n <- 4600
+  dat <- data.frame(
+    y = rnorm(n),
+    x = rnorm(n),
+    lon = runif(n, min = -125, max = -66),
+    lat = runif(n, min = 25, max = 49)
+  )
+  data_path <- tempfile("scpc_large_n_", fileext = ".csv")
+  write.csv(dat, data_path, row.names = FALSE)
+
+  tmpdir <- tempfile("scpc_stata_large_n_")
+  dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(tmpdir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  run_large_n_case <- function(id, uncond) {
+    stata_stats <- file.path(tmpdir, paste0("stata_stats_", id, ".csv"))
+    r_stats <- file.path(tmpdir, paste0("r_stats_", id, ".csv"))
+    opts <- c("latlong", "avc(0.1)", "k(1)")
+    if (isTRUE(uncond)) {
+      opts <- c(opts, "uncond")
+    }
+
+    lines <- c(
+      "clear all",
+      "set more off",
+      sprintf("import delimited \"%s\", varnames(1) clear", data_path),
+      "regress y x, robust",
+      "gen s_1 = lat",
+      "gen s_2 = lon",
+      sprintf("scpc, %s", paste(opts, collapse = " ")),
+      stata_export_helpers(stata_stats, tempfile(fileext = ".csv"), write_cvs = FALSE)
+    )
+
+    stata_res <- run_stata_do(stata_bin, lines)
+    failed <- stata_res$status != 0L || !file.exists(stata_stats)
+    if (failed) {
+      log_tail <- ""
+      if (!is.na(stata_res$log_file) && file.exists(stata_res$log_file)) {
+        lg <- readLines(stata_res$log_file, warn = FALSE)
+        log_tail <- paste(utils::tail(lg, 80), collapse = "\n")
+      }
+      unlink(c(stata_res$do_file, stata_res$log_files))
+      stop(paste("Stata large-n scenario failed:", id, log_tail), call. = FALSE)
+    }
+    unlink(c(stata_res$do_file, stata_res$log_files))
+
+    fit <- stats::lm(y ~ x, data = dat)
+    out <- scpc(
+      model = fit,
+      data = dat,
+      lon = "lon",
+      lat = "lat",
+      ncoef = 2,
+      avc = 0.1,
+      method = "approx",
+      large_n_seed = 1,
+      uncond = uncond,
+      cvs = FALSE
+    )
+
+    r_stats_tab <- as.data.frame(out$scpcstats)
+    r_stats_tab$term <- rownames(out$scpcstats)
+    rownames(r_stats_tab) <- NULL
+    names(r_stats_tab) <- c("coef", "std_err", "t", "p", "ci_low", "ci_high", "term")
+    r_stats_tab <- r_stats_tab[, c("term", "coef", "std_err", "t", "p", "ci_low", "ci_high")]
+    write.csv(r_stats_tab, r_stats, row.names = FALSE)
+
+    s_stats <- read_stata_scpcstats(stata_stats)
+    r_stats_tab <- read.csv(r_stats, stringsAsFactors = FALSE, check.names = FALSE)
+    assert_stats_close(s_stats, r_stats_tab, tol = 2e-4)
+  }
+
+  run_large_n_case("large_n_uncond", uncond = TRUE)
+  run_large_n_case("large_n_cond", uncond = FALSE)
 })

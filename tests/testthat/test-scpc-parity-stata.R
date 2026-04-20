@@ -278,7 +278,7 @@ run_r_scenario <- function(data_path, scenario, out_stats_path, out_cvs_path) {
     args$lon <- "lon"
     args$lat <- "lat"
   } else {
-    args$coord_euclidean <- c("lon", "lat")
+    args$coords_euclidean <- c("lon", "lat")
   }
   if (!is.null(scenario$avc)) {
     args$avc <- scenario$avc

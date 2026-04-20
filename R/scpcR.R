@@ -607,15 +607,15 @@
   list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
 }
 
-.resolve_coords_input <- function(data, obs_index, lon, lat, coord_euclidean) {
+.resolve_coords_input <- function(data, obs_index, lon, lat, coords_euclidean) {
   use_geodesic <- !is.null(lon) || !is.null(lat)
-  use_euclidean <- !is.null(coord_euclidean)
+  use_euclidean <- !is.null(coords_euclidean)
 
   if (use_geodesic && use_euclidean) {
-    stop("Specify either `lon`/`lat` or `coord_euclidean`, not both.")
+    stop("Specify either `lon`/`lat` or `coords_euclidean`, not both.")
   }
   if (!use_geodesic && !use_euclidean) {
-    stop("Specify coordinates via `lon`/`lat` or `coord_euclidean`.")
+    stop("Specify coordinates via `lon`/`lat` or `coords_euclidean`.")
   }
 
   if (use_geodesic) {
@@ -646,16 +646,16 @@
     return(list(coords = as.matrix(coords), latlong = TRUE))
   }
 
-  if (!is.character(coord_euclidean) || length(coord_euclidean) < 1L) {
-    stop("`coord_euclidean` must be a character vector with at least one column name.")
+  if (!is.character(coords_euclidean) || length(coords_euclidean) < 1L) {
+    stop("`coords_euclidean` must be a character vector with at least one column name.")
   }
-  miss <- setdiff(coord_euclidean, names(data))
+  miss <- setdiff(coords_euclidean, names(data))
   if (length(miss) > 0) {
     stop("Coordinate variables not found in data: ", paste(miss, collapse = ", "))
   }
-  coords <- data[obs_index, coord_euclidean, drop = FALSE]
+  coords <- data[obs_index, coords_euclidean, drop = FALSE]
   if (!all(vapply(coords, is.numeric, logical(1)))) {
-    stop("`coord_euclidean` columns must be numeric.")
+    stop("`coords_euclidean` columns must be numeric.")
   }
   if (any(!is.finite(as.matrix(coords)))) {
     stop("Euclidean coordinates must be finite.")
@@ -677,22 +677,20 @@
 #'   (\code{\link[fixest]{feols}}) objects, including IV models.
 #' @param data Data frame used to fit \code{model}.  Must contain the
 #'   coordinate columns referenced by \code{lon}/\code{lat} or
-#'   \code{coord_euclidean}.
+#'   \code{coords_euclidean}.
 #' @param lon Character string naming the longitude column in \code{data}.
 #'   Must be supplied together with \code{lat}.
 #' @param lat Character string naming the latitude column in \code{data}.
 #'   Must be supplied together with \code{lon}.
-#' @param coord_euclidean Character vector of one or more column names in
+#' @param coords_euclidean Character vector of one or more column names in
 #'   \code{data} for Euclidean coordinates.  Supply either
-#'   \code{lon}/\code{lat} or \code{coord_euclidean}, not both.
+#'   \code{lon}/\code{lat} or \code{coords_euclidean}, not both.
 #' @param cluster Optional character string naming a clustering variable
 #'   in \code{data}.  When clustering is used, coordinates are taken from
 #'   the first observation in each cluster; they should be constant
 #'   within clusters.
 #' @param ncoef Integer; number of coefficients to report.  Default
 #'   \code{NULL} reports all coefficients.
-#' @param k Deprecated alias for \code{ncoef}, retained for
-#'   compatibility with the Stata \command{scpc} command.
 #' @param avc Numeric; upper bound on the average pairwise correlation
 #'   for which size is controlled.  Must be in \code{(0.001, 0.99)}.
 #'   Default is 0.03.
@@ -757,7 +755,7 @@
 #' fit <- lm(y ~ x, data = d)
 #'
 #' # Euclidean coordinates, unconditional
-#' out <- scpc(fit, data = d, coord_euclidean = c("lon", "lat"),
+#' out <- scpc(fit, data = d, coords_euclidean = c("lon", "lat"),
 #'             avc = 0.1, uncond = TRUE)
 #' out
 #'
@@ -770,23 +768,14 @@ scpc <- function(model,
                  data,
                  lon      = NULL,
                  lat      = NULL,
-                 coord_euclidean = NULL,
+                 coords_euclidean = NULL,
                  cluster  = NULL,
                  ncoef    = NULL,
                  avc      = 0.03,
                  method   = "auto",
                  large_n_seed = 1,
                  uncond   = FALSE,
-                 cvs      = FALSE,
-                 k        = NULL) {
-
-  ## Resolve ncoef / k -------------------------------------------------------
-  if (!is.null(k)) {
-    if (!is.null(ncoef)) {
-      stop("Specify either `ncoef` or `k`, not both.")
-    }
-    ncoef <- k
-  }
+                 cvs      = FALSE) {
 
   if (avc <= 0.001 || avc >= 0.99)
     stop("Option avc() must be in (0.001, 0.99).")
@@ -814,7 +803,7 @@ scpc <- function(model,
   }
 
   obs_index <- .get_obs_index(model, data)
-  coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coord_euclidean)
+  coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
   coords  <- coord_info$coords
   latlong <- coord_info$latlong
 

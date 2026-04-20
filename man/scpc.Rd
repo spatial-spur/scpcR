@@ -13,15 +13,14 @@ scpc(
   data,
   lon = NULL,
   lat = NULL,
-  coord_euclidean = NULL,
+  coords_euclidean = NULL,
   cluster = NULL,
   ncoef = NULL,
   avc = 0.03,
   method = "auto",
   large_n_seed = 1,
   uncond = FALSE,
-  cvs = FALSE,
-  k = NULL
+  cvs = FALSE
 )
 
 \method{print}{scpc}(x, ...)
@@ -39,7 +38,7 @@ Currently supported: \code{\link{lm}} and \pkg{fixest}
 
 \item{data}{Data frame used to fit \code{model}.  Must contain the
 coordinate columns referenced by \code{lon}/\code{lat} or
-\code{coord_euclidean}.}
+\code{coords_euclidean}.}
 
 \item{lon}{Character string naming the longitude column in \code{data}.
 Must be supplied together with \code{lat}.}
@@ -47,9 +46,9 @@ Must be supplied together with \code{lat}.}
 \item{lat}{Character string naming the latitude column in \code{data}.
 Must be supplied together with \code{lon}.}
 
-\item{coord_euclidean}{Character vector of one or more column names in
+\item{coords_euclidean}{Character vector of one or more column names in
 \code{data} for Euclidean coordinates.  Supply either
-\code{lon}/\code{lat} or \code{coord_euclidean}, not both.}
+\code{lon}/\code{lat} or \code{coords_euclidean}, not both.}
 
 \item{cluster}{Optional character string naming a clustering variable
 in \code{data}.  When clustering is used, coordinates are taken from
@@ -83,9 +82,6 @@ values only (skip the conditional adjustment of Mueller and Watson
 \item{cvs}{Logical; if \code{TRUE}, include per-coefficient critical
 values at the 32\%, 10\%, 5\%, and 1\% levels.  Default is
 \code{FALSE}.}
-
-\item{k}{Deprecated alias for \code{ncoef}, retained for
-compatibility with the Stata \command{scpc} command.}
 
 \item{x}{An object of class \code{"scpc"}.}
 
@@ -136,7 +132,7 @@ d <- data.frame(
 fit <- lm(y ~ x, data = d)
 
 # Euclidean coordinates, unconditional
-out <- scpc(fit, data = d, coord_euclidean = c("lon", "lat"),
+out <- scpc(fit, data = d, coords_euclidean = c("lon", "lat"),
             avc = 0.1, uncond = TRUE)
 out
 

@@ -1,3 +1,94 @@
+manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc, coef_names) {
+  n <- nrow(data)
+  coef_vec <- stats::coef(model)
+  S <- sandwich::estfun(model)
+  bread_inv <- sandwich::bread(model) / n
+  model_mat <- .get_scpc_model_matrix(model)
+  D <- .getdistmat(as.matrix(data[, coord_cols, drop = FALSE]), latlong = FALSE)
+  spc <- .setOmsWfin(D, avc)
+  Wfin <- spc$Wfin
+  Omsfin <- spc$Omsfin
+  q <- ncol(Wfin) - 1L
+  levs <- c(0.32, 0.10, 0.05, 0.01)
+  cvs_uncond <- vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0)
+
+  aux_data <- data
+  aux_var <- "scpc_rx_manual"
+  while (aux_var %in% names(aux_data)) {
+    aux_var <- paste0(aux_var, "_")
+  }
+  aux_formula <- stats::as.formula(
+    paste(aux_var, "~ ."),
+    env = environment(stats::formula(model))
+  )
+
+  stats_out <- matrix(
+    NA_real_,
+    nrow = length(coef_names),
+    ncol = 6,
+    dimnames = list(coef_names, c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %"))
+  )
+  cvs_out <- matrix(
+    NA_real_,
+    nrow = length(coef_names),
+    ncol = 4,
+    dimnames = list(coef_names, c("32%", "10%", "5%", "1%"))
+  )
+
+  for (i in seq_along(coef_names)) {
+    coef_name <- coef_names[[i]]
+    pos <- match(coef_name, colnames(bread_inv))
+    if (is.na(pos)) {
+      stop("Missing coefficient in manual IV reference: ", coef_name, call. = FALSE)
+    }
+
+    wj <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(S)) + coef_vec[[coef_name]]
+    tau_u <- as.numeric(
+      sqrt(q) * crossprod(Wfin[, 1], wj) /
+        sqrt(sum((t(Wfin[, -1]) %*% wj)^2))
+    )
+    se <- as.numeric(
+      sqrt(sum((t(Wfin[, -1]) %*% wj)^2)) / (sqrt(q) * sqrt(n))
+    )
+    p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
+
+    xj <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(model_mat))
+    xjs <- sign(xj)
+    Wx <- Wfin
+    Wx[, 1] <- Wx[, 1] * xj * xjs
+    if (ncol(Wx) > 1L) {
+      for (col in 2:ncol(Wx)) {
+        aux_data[[aux_var]] <- Wfin[, col] * xjs
+        aux_fit <- update(
+          model,
+          aux_formula,
+          data = aux_data,
+          nthreads = 1L,
+          notes = FALSE
+        )
+        Wx[, col] <- stats::residuals(aux_fit) * xj
+      }
+    }
+
+    Omsx <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
+    p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
+    cvs_cond <- vapply(levs, function(lv) .getcv(Omsx, q, lv), 0.0)
+    cv <- max(spc$cvfin, cvs_cond[[3]])
+
+    stats_out[i, ] <- c(
+      coef_vec[[coef_name]],
+      se,
+      tau_u,
+      max(p_u, p_c),
+      coef_vec[[coef_name]] - cv * se,
+      coef_vec[[coef_name]] + cv * se
+    )
+    cvs_out[i, ] <- pmax(cvs_uncond, cvs_cond)
+  }
+
+  list(stats = stats_out, cvs = cvs_out)
+}
+
 test_that("scpc returns a result with the expected structure", {
   dat <- make_python_scpc_data()
   fit <- stats::lm(y ~ x, data = dat)
@@ -248,6 +339,59 @@ test_that("scpc supports fixest IV models in unconditional and conditional modes
     expect_equal(dim(out_c$scpccvs), c(2, 4))
     expect_true(all(is.finite(out_u$scpcstats)))
     expect_true(all(is.finite(out_c$scpcstats)))
+  })
+})
+
+test_that("conditional SCPC for fixest IV matches a manual auxiliary-IV reference", {
+  skip_if_not_installed("fixest")
+
+  with_fixest_single_thread({
+    set.seed(2028)
+    n_fe <- 30
+    t_per_fe <- 6
+    n <- n_fe * t_per_fe
+    fe <- rep(seq_len(n_fe), each = t_per_fe)
+    z <- stats::rnorm(n)
+    w <- stats::rnorm(n)
+    u <- stats::rnorm(n)
+    x <- 0.8 * z + 0.4 * w + 0.6 * u + stats::rnorm(n, sd = 0.2)
+    y <- 1 + 1.1 * x + 0.5 * w + stats::rnorm(n_fe)[fe] + u
+    dat <- data.frame(
+      y = y,
+      x = x,
+      z = z,
+      w = w,
+      fe = fe,
+      coord_x = runif(n),
+      coord_y = runif(n)
+    )
+
+    fit <- fixest::feols(y ~ w + i(fe) | x ~ z, data = dat)
+    out <- scpc(
+      fit,
+      dat,
+      coords_euclidean = c("coord_x", "coord_y"),
+      ncoef = 3,
+      avc = 0.05,
+      uncond = FALSE,
+      cvs = TRUE
+    )
+    ref <- manual_fixest_iv_conditional_reference(
+      fit,
+      dat,
+      coord_cols = c("coord_x", "coord_y"),
+      avc = 0.05,
+      coef_names = c("fit_x", "w")
+    )
+
+    stats_out <- as.data.frame(out$scpcstats)
+    stats_out$term <- rownames(out$scpcstats)
+    stats_out <- stats_out[stats_out$term %in% rownames(ref$stats), , drop = FALSE]
+    stats_mat <- as.matrix(stats_out[, c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")])
+    rownames(stats_mat) <- stats_out$term
+
+    expect_equal(stats_mat[rownames(ref$stats), , drop = FALSE], ref$stats, tolerance = 1e-8)
+    expect_equal(out$scpccvs[rownames(ref$cvs), , drop = FALSE], ref$cvs, tolerance = 1e-8)
   })
 })
 

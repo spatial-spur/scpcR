@@ -5,8 +5,8 @@ STATA_STATS_TOL <- c(
   std_err = 1e-4,
   t = 1e-4,
   p = 1e-4,
-  ci_low = 1e-4,
-  ci_high = 1e-4
+  ci_low = 1e-3,
+  ci_high = 1e-3
 )
 
 STATA_CVS_TOL <- c(

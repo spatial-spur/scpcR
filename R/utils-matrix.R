@@ -58,6 +58,37 @@
   Wx
 }
 
+.orthogonalize_W_fixest_iv <- function(W, xj, xjs, template_model, template_data) {
+  Wx <- W
+  Wx[, 1] <- Wx[, 1] * xj * xjs
+
+  if (ncol(Wx) > 1L) {
+    aux_data <- template_data
+    aux_var <- "scpc_rx"
+    while (aux_var %in% names(aux_data)) {
+      aux_var <- paste0(aux_var, "_")
+    }
+    aux_formula <- stats::as.formula(
+      paste(aux_var, "~ ."),
+      env = environment(stats::formula(template_model))
+    )
+
+    for (col in 2:ncol(Wx)) {
+      aux_data[[aux_var]] <- W[, col] * xjs
+      aux_fit <- update(
+        template_model,
+        aux_formula,
+        data = aux_data,
+        nthreads = 1L,
+        notes = FALSE
+      )
+      Wx[, col] <- stats::residuals(aux_fit) * xj
+    }
+  }
+
+  Wx
+}
+
 # ---------------------------------------------------------------------------
 # Orthogonalisation helper (conditional SCPC, clustered)
 # ---------------------------------------------------------------------------

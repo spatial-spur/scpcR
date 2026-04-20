@@ -109,19 +109,25 @@ scpc <- function(model,
     stop("Model matrix row count does not match score matrix row count.")
   }
 
-  cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
-  model_mat_cond <- cond_setup$model_mat
-  cond_include_intercept <- cond_setup$include_intercept
-  cond_fixef_id <- cond_setup$fixef_id
-  if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
-    stop(
-      "Conditional projection matrix dimensions are incompatible with model coefficients ",
-      "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
-      ", expected ", n, " x ", p, ")."
-    )
+  obs_index <- .get_obs_index(model, data)
+  iv_cond_setup <- .get_fixest_iv_conditional_template(model, data, obs_index, uncond, cluster)
+
+  cond_include_intercept <- TRUE
+  cond_fixef_id <- NULL
+  if (is.null(iv_cond_setup)) {
+    cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
+    model_mat_cond <- cond_setup$model_mat
+    cond_include_intercept <- cond_setup$include_intercept
+    cond_fixef_id <- cond_setup$fixef_id
+    if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
+      stop(
+        "Conditional projection matrix dimensions are incompatible with model coefficients ",
+        "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
+        ", expected ", n, " x ", p, ")."
+      )
+    }
   }
 
-  obs_index <- .get_obs_index(model, data)
   coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
   coords <- coord_info$coords
   latlong <- coord_info$latlong
@@ -196,6 +202,24 @@ scpc <- function(model,
         Wx <- .orthogonalize_W_cluster(
           Wfin, cl_vec, xj_indiv, model_mat_cond,
           include_intercept = cond_include_intercept
+        )
+      } else if (!is.null(iv_cond_setup)) {
+        template_pos <- match(coef_names[[j]], iv_cond_setup$coef_names)
+        if (is.na(template_pos)) {
+          stop(
+            "Could not align fixest IV conditional template with coefficient: ",
+            coef_names[[j]]
+          )
+        }
+        xj <- as.numeric(
+          iv_cond_setup$n * iv_cond_setup$bread_inv[template_pos, , drop = TRUE] %*%
+            t(iv_cond_setup$model_mat)
+        )
+        xjs <- sign(xj)
+        Wx <- .orthogonalize_W_fixest_iv(
+          Wfin, xj, xjs,
+          template_model = iv_cond_setup$model,
+          template_data = iv_cond_setup$data
         )
       } else {
         ## Non-clustered conditional

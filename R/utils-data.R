@@ -47,6 +47,65 @@
     length(model$fixef_vars) > 0L
 }
 
+.quote_scpc_name <- function(name) {
+  if (grepl("^[A-Za-z.][A-Za-z0-9._]*$", name)) {
+    return(name)
+  }
+  paste0("`", gsub("`", "\\\\`", name), "`")
+}
+
+.get_fixest_iv_conditional_template <- function(model, data, obs_index, uncond, cluster) {
+  if (isTRUE(uncond) ||
+      !inherits(model, "fixest") ||
+      !isTRUE(model$iv) ||
+      !isTRUE(model$iv_stage == 2) ||
+      !is.null(cluster)) {
+    return(NULL)
+  }
+
+  data_obs <- data[obs_index, , drop = FALSE]
+  rownames(data_obs) <- seq_len(nrow(data_obs))
+
+  update_fml <- if (.has_fixest_fe(model)) {
+    fe_terms <- paste0("i(", vapply(model$fixef_vars, .quote_scpc_name, character(1)), ")")
+    stats::as.formula(
+      paste(". ~ . +", paste(fe_terms, collapse = " + "), "| 0 | ."),
+      env = environment(stats::formula(model))
+    )
+  } else {
+    . ~ .
+  }
+
+  template <- tryCatch(
+    update(
+      model,
+      update_fml,
+      data = data_obs,
+      nthreads = 1L,
+      notes = FALSE
+    ),
+    error = function(e) e
+  )
+  if (inherits(template, "error")) {
+    stop("Could not build fixest IV conditional template: ", conditionMessage(template))
+  }
+
+  bread_inv <- sandwich::bread(template) / nrow(data_obs)
+  model_mat <- .get_scpc_model_matrix(template)
+  if (nrow(model_mat) != nrow(data_obs)) {
+    stop("Internal error: fixest IV conditional template has incompatible row count.")
+  }
+
+  list(
+    model = template,
+    data = data_obs,
+    model_mat = model_mat,
+    bread_inv = bread_inv,
+    n = nrow(data_obs),
+    coef_names = names(stats::coef(template))
+  )
+}
+
 .get_conditional_projection_setup <- function(model, model_mat, n, uncond) {
   setup <- list(model_mat = as.matrix(model_mat), include_intercept = TRUE, fixef_id = NULL)
   if (isTRUE(uncond) || !inherits(model, "fixest") || !.has_fixest_fe(model)) {

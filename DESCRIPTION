@@ -1,7 +1,7 @@
 Package: scpcR
 Type: Package
 Title: Spatial Correlation-Robust Inference for Regression Coefficients
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(
     person("David", "Boll", email = "david.boll@warwick.ac.uk", role = c("aut", "cre")),
     person("Daniel", "Goettlich", email = "daniel.goettlich@econ.uzh.ch", role = "aut")

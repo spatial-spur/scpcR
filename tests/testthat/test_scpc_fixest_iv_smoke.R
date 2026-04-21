@@ -219,3 +219,53 @@ test_that("scpc handles clustered fixest IV models with absorbed fixed effects",
     expect_true(all(is.finite(out$scpccvs)))
   })
 })
+
+test_that("scpc handles clustered fixest IV models in the large-n approximation path", {
+  skip_if_not_installed("fixest")
+
+  with_fixest_single_thread({
+    set.seed(2006)
+    n_cluster <- 40
+    cl_size <- 3
+    n <- n_cluster * cl_size
+    cl <- rep(seq_len(n_cluster), each = cl_size)
+    z <- stats::rnorm(n)
+    w <- stats::rnorm(n)
+    u <- stats::rnorm(n)
+    x <- 0.8 * z + 0.2 * w + u
+    y <- 1 + 1.15 * x + 0.35 * w + u
+    lon_cl <- runif(n_cluster)
+    lat_cl <- runif(n_cluster)
+    dat <- data.frame(
+      y = y,
+      x = x,
+      w = w,
+      z = z,
+      cl = cl,
+      lon = lon_cl[cl],
+      lat = lat_cl[cl]
+    )
+
+    fit <- fixest::feols(y ~ w | x ~ z, data = dat)
+    out <- expect_no_warning(
+      scpc(
+        fit,
+        dat,
+        coords_euclidean = c("lon", "lat"),
+        cluster = "cl",
+        ncoef = 2,
+        avc = 0.1,
+        method = "approx",
+        large_n_seed = 1,
+        uncond = FALSE,
+        cvs = TRUE
+      )
+    )
+
+    expect_s3_class(out, "scpc")
+    expect_identical(out$method, "approx")
+    expect_equal(out$large_n_seed, 1)
+    expect_true(all(is.finite(out$scpcstats)))
+    expect_true(all(is.finite(out$scpccvs)))
+  })
+})

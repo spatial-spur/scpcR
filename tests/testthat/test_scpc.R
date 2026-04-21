@@ -1,19 +1,11 @@
-manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc, coef_names) {
+manual_fixest_iv_conditional_reference <- function(model,
+                                                   data,
+                                                   coord_cols,
+                                                   avc,
+                                                   coef_names,
+                                                   method = "exact",
+                                                   large_n_seed = 1) {
   design <- .get_fixest_iv_design(model)
-  residualize <- function(Y) {
-    X <- design$X
-    Z <- design$Z
-    Y <- as.matrix(Y)
-    if (!is.null(design$fixef_id)) {
-      X <- as.matrix(fixest::demean(X, f = design$fixef_id, nthreads = 1L))
-      Z <- as.matrix(fixest::demean(Z, f = design$fixef_id, nthreads = 1L))
-      Y <- as.matrix(fixest::demean(Y, f = design$fixef_id, nthreads = 1L))
-    }
-    qrZ <- qr(Z)
-    PzX <- qr.fitted(qrZ, X)
-    PzY <- qr.fitted(qrZ, Y)
-    Y - X %*% solve(crossprod(X, PzX), crossprod(X, PzY))
-  }
 
   n <- nrow(data)
   coef_vec <- stats::coef(model)
@@ -23,13 +15,20 @@ manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc,
   if (!is.null(design$fixef_id)) {
     model_mat <- as.matrix(fixest::demean(model_mat, f = design$fixef_id, nthreads = 1L))
   }
-  D <- .getdistmat(as.matrix(data[, coord_cols, drop = FALSE]), latlong = FALSE)
-  spc <- .setOmsWfin(D, avc)
+  spc <- .setOmsWfin(
+    as.matrix(data[, coord_cols, drop = FALSE]),
+    avc0 = avc,
+    latlong = FALSE,
+    method = method,
+    large_n_seed = large_n_seed
+  )
   Wfin <- spc$Wfin
   Omsfin <- spc$Omsfin
+  perm <- spc$perm
   q <- ncol(Wfin) - 1L
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_uncond <- vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0)
+  large_n_random_state <- spc$random_state
 
   stats_out <- matrix(
     NA_real_,
@@ -52,20 +51,51 @@ manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc,
     }
 
     wj <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(S)) + coef_vec[[coef_name]]
+    wj_perm <- wj[perm]
     tau_u <- as.numeric(
-      sqrt(q) * crossprod(Wfin[, 1], wj) /
-        sqrt(sum((t(Wfin[, -1]) %*% wj)^2))
+      sqrt(q) * crossprod(Wfin[, 1], wj_perm) /
+        sqrt(sum((t(Wfin[, -1]) %*% wj_perm)^2))
     )
     se <- as.numeric(
-      sqrt(sum((t(Wfin[, -1]) %*% wj)^2)) / (sqrt(q) * sqrt(n))
+      sqrt(sum((t(Wfin[, -1]) %*% wj_perm)^2)) / (sqrt(q) * sqrt(n))
     )
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
-    xj <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(model_mat))
+    xj_raw <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(model_mat))
+    if (spc$large_n) {
+      residualize <- .make_iv_residualizer(
+        design$X[perm, , drop = FALSE],
+        design$Z[perm, , drop = FALSE],
+        fixef_id = .permute_fixef_id(design$fixef_id, perm)
+      )
+      xj <- xj_raw[perm]
+    } else {
+      residualize <- .make_iv_residualizer(
+        design$X,
+        design$Z,
+        fixef_id = design$fixef_id
+      )
+      xj <- xj_raw
+    }
     xjs <- sign(xj)
     Wx <- .orthogonalize_W_iv(Wfin, xj, xjs, residualize = residualize)
 
-    Omsx <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
+    if (spc$large_n) {
+      omsx_res <- .lnget_Oms(
+        spc$coords,
+        spc$c0,
+        spc$cmax,
+        Wx,
+        1.2,
+        capM = 1000000L,
+        random_t = large_n_random_state,
+        latlong = FALSE
+      )
+      Omsx <- omsx_res$Oms
+      large_n_random_state <- omsx_res$state
+    } else {
+      Omsx <- .getOms(spc$distmat, spc$c0, spc$cmax, Wx, 1.2)
+    }
     p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
     cvs_cond <- vapply(levs, function(lv) .getcv(Omsx, q, lv), 0.0)
     cv <- max(spc$cvfin, cvs_cond[[3]])
@@ -231,6 +261,117 @@ test_that("scpc validates cluster input and coordinate mode selection", {
     scpc(fit, data = dat, coords_euclidean = "lon", avc = 1, uncond = TRUE),
     "`avc` must lie in \\(0.001, 0.99\\)"
   )
+})
+
+test_that("scpc validates method and large_n_seed", {
+  dat <- make_scpc_data()
+  fit <- stats::lm(y ~ x, data = dat)
+
+  expect_error(
+    scpc(
+      fit,
+      data = dat,
+      coords_euclidean = c("lon", "lat"),
+      avc = 0.1,
+      method = "bad",
+      uncond = TRUE
+    ),
+    "`method` must be one of \"auto\", \"exact\", or \"approx\""
+  )
+  expect_error(
+    scpc(
+      fit,
+      data = dat,
+      coords_euclidean = c("lon", "lat"),
+      avc = 0.1,
+      large_n_seed = 1.5,
+      uncond = TRUE
+    ),
+    "`large_n_seed` must be a single integer-valued number in \\[0, 2\\^32\\)"
+  )
+})
+
+test_that("scpc method override can force exact or approximation branches", {
+  dat_small <- make_scpc_data(n = 40)
+  fit_small <- stats::lm(y ~ x, data = dat_small)
+
+  out_auto_small <- scpc(
+    fit_small,
+    data = dat_small,
+    coords_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "auto",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+  out_exact_small <- scpc(
+    fit_small,
+    data = dat_small,
+    coords_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "exact",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+  out_approx_small_a <- scpc(
+    fit_small,
+    data = dat_small,
+    coords_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "approx",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+  out_approx_small_b <- scpc(
+    fit_small,
+    data = dat_small,
+    coords_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "approx",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+
+  expect_identical(out_auto_small$method, "exact")
+  expect_identical(out_exact_small$method, "exact")
+  expect_identical(out_approx_small_a$method, "approx")
+  expect_equal(out_auto_small$scpcstats, out_exact_small$scpcstats, tolerance = 1e-10)
+  expect_equal(out_auto_small$c0, out_exact_small$c0, tolerance = 1e-10)
+  expect_equal(out_auto_small$cv, out_exact_small$cv, tolerance = 1e-10)
+  expect_equal(out_auto_small$q, out_exact_small$q)
+  expect_equal(out_approx_small_a$scpcstats, out_approx_small_b$scpcstats, tolerance = 1e-12)
+  expect_equal(out_approx_small_a$c0, out_approx_small_b$c0, tolerance = 1e-12)
+  expect_equal(out_approx_small_a$cv, out_approx_small_b$cv, tolerance = 1e-12)
+  expect_equal(out_approx_small_a$q, out_approx_small_b$q)
+  expect_true(all(is.finite(out_approx_small_a$scpcstats)))
+})
+
+test_that("scpc routes auto to the large-n path in a full run", {
+  skip_if(
+    !identical(Sys.getenv("SCPCR_RUN_HEAVY_TESTS", "false"), "true"),
+    "set SCPCR_RUN_HEAVY_TESTS=true to run the full large-n routing integration test"
+  )
+
+  dat_large <- make_scpc_data(n = 4500)
+  fit_large <- stats::lm(y ~ x, data = dat_large)
+
+  out_auto_large <- scpc(
+    fit_large,
+    data = dat_large,
+    coords_euclidean = c("lon", "lat"),
+    ncoef = 1,
+    avc = 0.1,
+    method = "auto",
+    large_n_seed = 1,
+    uncond = TRUE
+  )
+
+  expect_identical(out_auto_large$method, "approx")
+  expect_true(all(is.finite(out_auto_large$scpcstats)))
 })
 
 test_that("scpc does not accept the old k argument", {
@@ -402,6 +543,65 @@ test_that("conditional SCPC for fixest IV matches a direct 2SLS residualization 
     stats_mat <- as.matrix(stats_out[, c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")])
     rownames(stats_mat) <- stats_out$term
 
+    expect_equal(stats_mat[rownames(ref$stats), , drop = FALSE], ref$stats, tolerance = 1e-8)
+    expect_equal(out$scpccvs[rownames(ref$cvs), , drop = FALSE], ref$cvs, tolerance = 1e-8)
+  })
+})
+
+test_that("conditional SCPC for fixest IV matches a direct large-n reference", {
+  skip_if_not_installed("fixest")
+
+  with_fixest_single_thread({
+    set.seed(2031)
+    n_fe <- 30
+    t_per_fe <- 6
+    n <- n_fe * t_per_fe
+    fe <- rep(seq_len(n_fe), each = t_per_fe)
+    z <- stats::rnorm(n)
+    w <- stats::rnorm(n)
+    u <- stats::rnorm(n)
+    x <- 0.8 * z + 0.4 * w + 0.6 * u + stats::rnorm(n, sd = 0.2)
+    y <- 1 + 1.1 * x + 0.5 * w + stats::rnorm(n_fe)[fe] + u
+    dat <- data.frame(
+      y = y,
+      x = x,
+      z = z,
+      w = w,
+      fe = fe,
+      coord_x = runif(n),
+      coord_y = runif(n)
+    )
+
+    fit <- fixest::feols(y ~ w | fe | x ~ z, data = dat)
+    out <- scpc(
+      fit,
+      dat,
+      coords_euclidean = c("coord_x", "coord_y"),
+      ncoef = 2,
+      avc = 0.05,
+      method = "approx",
+      large_n_seed = 1,
+      uncond = FALSE,
+      cvs = TRUE
+    )
+    ref <- manual_fixest_iv_conditional_reference(
+      fit,
+      dat,
+      coord_cols = c("coord_x", "coord_y"),
+      avc = 0.05,
+      coef_names = c("fit_x", "w"),
+      method = "approx",
+      large_n_seed = 1
+    )
+
+    stats_out <- as.data.frame(out$scpcstats)
+    stats_out$term <- rownames(out$scpcstats)
+    stats_out <- stats_out[stats_out$term %in% rownames(ref$stats), , drop = FALSE]
+    stats_mat <- as.matrix(stats_out[, c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")])
+    rownames(stats_mat) <- stats_out$term
+
+    expect_identical(out$method, "approx")
+    expect_equal(out$large_n_seed, 1)
     expect_equal(stats_mat[rownames(ref$stats), , drop = FALSE], ref$stats, tolerance = 1e-8)
     expect_equal(out$scpccvs[rownames(ref$cvs), , drop = FALSE], ref$cvs, tolerance = 1e-8)
   })

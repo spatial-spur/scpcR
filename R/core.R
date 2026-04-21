@@ -27,6 +27,14 @@
 #' @param avc Numeric; upper bound on the average pairwise correlation
 #'   for which size is controlled.  Must be in \code{(0.001, 0.99)}.
 #'   Default is 0.03.
+#' @param method Character string selecting the spatial algorithm.
+#'   \code{"auto"} chooses \code{"exact"} for smaller problems and
+#'   \code{"approx"} once the large-\eqn{n} threshold is reached.
+#'   \code{"exact"} always uses the full distance matrix.
+#'   \code{"approx"} uses the original large-\eqn{n} approximation branch.
+#' @param large_n_seed Numeric; integer-valued seed used by the
+#'   large-\eqn{n} approximation branch.  Ignored when
+#'   \code{method = "exact"}. Default is 1.
 #' @param uncond Logical; if \code{TRUE}, report unconditional critical
 #'   values only (skip the conditional adjustment of Mueller and Watson
 #'   2023).  Default is \code{FALSE}.
@@ -46,6 +54,10 @@
 #'     \code{avc}.}
 #'   \item{\code{cv}}{The unconditional 5\% critical value.}
 #'   \item{\code{q}}{Number of spatial principal components selected.}
+#'   \item{\code{method}}{Spatial algorithm used:
+#'     \code{"exact"} or \code{"approx"}.}
+#'   \item{\code{large_n_seed}}{Seed used by the large-\eqn{n}
+#'     approximation branch.}
 #'   \item{\code{call}}{The matched call.}
 #' }
 #'
@@ -90,6 +102,8 @@ scpc <- function(model,
                  cluster = NULL,
                  ncoef = NULL,
                  avc = 0.03,
+                 method = "auto",
+                 large_n_seed = 1,
                  uncond = FALSE,
                  cvs = FALSE) {
 
@@ -99,6 +113,8 @@ scpc <- function(model,
   if (avc <= 0.001 || avc >= 0.99) {
     stop("`avc` must lie in (0.001, 0.99).")
   }
+  method <- .validate_scpc_method(method)
+  large_n_seed <- .validate_large_n_seed(large_n_seed)
   if (
     !is.null(ncoef) &&
     (
@@ -218,12 +234,19 @@ scpc <- function(model,
   if (ncol(coords) == 1) coords <- cbind(coords, 0)
 
   ## 2. Spatial kernel (unconditional) ---------------------------------------
-  D <- .getdistmat(coords, latlong)
-  spc <- .setOmsWfin(D, avc)
+  spc <- .setOmsWfin(
+    coords,
+    avc0 = avc,
+    latlong = latlong,
+    method = method,
+    large_n_seed = large_n_seed
+  )
   Wfin <- spc$Wfin
   cvfin <- spc$cvfin
   Omsfin <- spc$Omsfin
+  perm <- spc$perm
   q <- ncol(Wfin) - 1
+  large_n_random_state <- spc$random_state
 
   ## 3. Bread ----------------------------------------------------------------
   bread_inv <- sandwich::bread(model) / n
@@ -241,58 +264,87 @@ scpc <- function(model,
   for (j in seq_len(k_use)) {
     coef_j <- coef_vec[[j]]
     wj <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + coef_j
+    wj_perm <- wj[perm]
 
     ## unconditional statistic -----------------------------------------------
-    denom <- sqrt(sum((t(Wfin[, -1, drop = FALSE]) %*% wj)^2))
+    denom <- sqrt(sum((t(Wfin[, -1, drop = FALSE]) %*% wj_perm)^2))
     if (!is.finite(denom) || denom <= sqrt(.Machine$double.eps)) {
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
-    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj) / denom)
+    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj_perm) / denom)
     SE <- as.numeric(denom / (sqrt(q) * sqrt(neff)))
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
     ## conditional branch (skip when uncond = TRUE) --------------------------
     if (!uncond) {
+      cl_vec_scpc <- NULL
+      if (!is.null(cluster)) {
+        cl_vec_scpc <- if (!identical(perm, seq_len(length(perm)))) {
+          factor(as.character(cl_vec), levels = levels(cl_vec)[perm])
+        } else {
+          cl_vec
+        }
+      }
+
       if (!is.null(cluster)) {
         xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
         if (is_fixest_iv) {
           Wx <- .orthogonalize_W_cluster_iv(
             Wfin = Wfin,
-            cl_vec = cl_vec,
+            cl_vec = cl_vec_scpc,
             xj_indiv = xj_indiv,
             residualize = iv_residualizer
           )
         } else {
           ## Clustered conditional: individual-level orthogonalization
           Wx <- .orthogonalize_W_cluster(
-            Wfin, cl_vec, xj_indiv, model_mat_cond,
+            Wfin, cl_vec_scpc, xj_indiv, model_mat_cond,
             include_intercept = cond_include_intercept
           )
         }
       } else if (is_fixest_iv) {
-        xj <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        xj_raw <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        if (isTRUE(spc$large_n)) {
+          residualize <- .make_iv_residualizer(
+            iv_cond_design$X[perm, , drop = FALSE],
+            iv_cond_design$Z[perm, , drop = FALSE],
+            fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm)
+          )
+          xj <- xj_raw[perm]
+        } else {
+          residualize <- iv_residualizer
+          xj <- xj_raw
+        }
         xjs <- sign(xj)
         Wx <- .orthogonalize_W_iv(
           Wfin = Wfin,
           xj = xj,
           xjs = xjs,
-          residualize = iv_residualizer
+          residualize = residualize
         )
       } else {
         ## Non-clustered conditional
         xj <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        model_mat_cond_j <- model_mat_cond
+        if (isTRUE(spc$large_n)) {
+          xj <- xj[perm]
+          model_mat_cond_j <- model_mat_cond[perm, , drop = FALSE]
+          cond_fixef_id_j <- .permute_fixef_id(cond_fixef_id, perm)
+        } else {
+          cond_fixef_id_j <- cond_fixef_id
+        }
         xjs <- sign(xj)
         Wx <- .orthogonalize_W(
-          Wfin, xj, xjs, model_mat_cond,
+          Wfin, xj, xjs, model_mat_cond_j,
           include_intercept = cond_include_intercept,
-          fixef_id = cond_fixef_id
+          fixef_id = cond_fixef_id_j
         )
       }
 
       if (!all(is.finite(Wx))) {
         stop("Conditional projection produced non-finite W values for coefficient: ", coef_names[[j]])
       }
-      if (nrow(Wx) != nrow(D) || ncol(Wx) != ncol(Wfin)) {
+      if (nrow(Wx) != nrow(Wfin) || ncol(Wx) != ncol(Wfin)) {
         stop("Conditional projection produced W with incompatible dimensions for coefficient: ", coef_names[[j]])
       }
       if (
@@ -302,7 +354,14 @@ scpc <- function(model,
         stop("Conditional projection collapsed all non-constant W columns for coefficient: ", coef_names[[j]])
       }
 
-      Omsx <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
+      omsx_res <- .get_conditional_Oms(
+        spc,
+        Wx,
+        latlong = latlong,
+        random_state = large_n_random_state
+      )
+      Omsx <- omsx_res$Oms
+      large_n_random_state <- omsx_res$random_state
       p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx <- .getcv(Omsx, q, 0.05)
       p_final <- max(p_u, p_c)
@@ -342,6 +401,8 @@ scpc <- function(model,
     c0 = spc$c0,
     cv = cvfin,
     q = q,
+    method = spc$method,
+    large_n_seed = large_n_seed,
     call = match.call()
   ), class = "scpc")
 }

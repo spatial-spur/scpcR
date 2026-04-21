@@ -17,6 +17,8 @@ scpc(
   cluster = NULL,
   ncoef = NULL,
   avc = 0.03,
+  method = "auto",
+  large_n_seed = 1,
   uncond = FALSE,
   cvs = FALSE
 )
@@ -58,6 +60,16 @@ in \code{data}. Coordinates must be constant within clusters.}
 for which size is controlled.  Must be in \code{(0.001, 0.99)}.
 Default is 0.03.}
 
+\item{method}{Character string selecting the spatial algorithm.
+\code{"auto"} chooses \code{"exact"} for smaller problems and
+\code{"approx"} once the large-\eqn{n} threshold is reached.
+\code{"exact"} always uses the full distance matrix.
+\code{"approx"} uses the original large-\eqn{n} approximation branch.}
+
+\item{large_n_seed}{Numeric; integer-valued seed used by the
+large-\eqn{n} approximation branch.  Ignored when
+\code{method = "exact"}. Default is 1.}
+
 \item{uncond}{Logical; if \code{TRUE}, report unconditional critical
 values only (skip the conditional adjustment of Mueller and Watson
 2023).  Default is \code{FALSE}.}
@@ -92,6 +104,10 @@ An object of class \code{"scpc"} with components:
     \code{avc}.}
   \item{\code{cv}}{The unconditional 5\% critical value.}
   \item{\code{q}}{Number of spatial principal components selected.}
+  \item{\code{method}}{Spatial algorithm used:
+    \code{"exact"} or \code{"approx"}.}
+  \item{\code{large_n_seed}}{Seed used by the large-\eqn{n}
+    approximation branch.}
   \item{\code{call}}{The matched call.}
 }
 }

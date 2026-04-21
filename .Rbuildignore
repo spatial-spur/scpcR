@@ -10,3 +10,4 @@
 ^chetty_data_1\.csv$
 ^scpcR_.*\.tar\.gz$
 ^\.claude$
+^\.github$

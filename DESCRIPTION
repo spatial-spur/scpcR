@@ -1,7 +1,7 @@
 Package: scpcR
 Type: Package
 Title: Spatial Correlation-Robust Inference for Regression Coefficients
-Version: 0.1.1
+Version: 0.1.2
 Authors@R: c(
     person("David", "Boll", email = "david.boll@warwick.ac.uk", role = c("aut", "cre")),
     person("Daniel", "Goettlich", email = "daniel.goettlich@econ.uzh.ch", role = "aut")
@@ -17,10 +17,10 @@ Encoding: UTF-8
 LazyData: true
 RoxygenNote: 7.3.2
 Imports:
+    fixest (>= 0.14.0),
     gaussquad,
     sandwich
 Suggests:
-    fixest,
     geodist,
     RSpectra,
     testthat (>= 3.0.0)

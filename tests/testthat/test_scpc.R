@@ -1,9 +1,28 @@
 manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc, coef_names) {
+  design <- .get_fixest_iv_design(model)
+  residualize <- function(Y) {
+    X <- design$X
+    Z <- design$Z
+    Y <- as.matrix(Y)
+    if (!is.null(design$fixef_id)) {
+      X <- as.matrix(fixest::demean(X, f = design$fixef_id, nthreads = 1L))
+      Z <- as.matrix(fixest::demean(Z, f = design$fixef_id, nthreads = 1L))
+      Y <- as.matrix(fixest::demean(Y, f = design$fixef_id, nthreads = 1L))
+    }
+    qrZ <- qr(Z)
+    PzX <- qr.fitted(qrZ, X)
+    PzY <- qr.fitted(qrZ, Y)
+    Y - X %*% solve(crossprod(X, PzX), crossprod(X, PzY))
+  }
+
   n <- nrow(data)
   coef_vec <- stats::coef(model)
   S <- sandwich::estfun(model)
   bread_inv <- sandwich::bread(model) / n
-  model_mat <- .get_scpc_model_matrix(model)
+  model_mat <- design$model_mat
+  if (!is.null(design$fixef_id)) {
+    model_mat <- as.matrix(fixest::demean(model_mat, f = design$fixef_id, nthreads = 1L))
+  }
   D <- .getdistmat(as.matrix(data[, coord_cols, drop = FALSE]), latlong = FALSE)
   spc <- .setOmsWfin(D, avc)
   Wfin <- spc$Wfin
@@ -11,16 +30,6 @@ manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc,
   q <- ncol(Wfin) - 1L
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_uncond <- vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0)
-
-  aux_data <- data
-  aux_var <- "scpc_rx_manual"
-  while (aux_var %in% names(aux_data)) {
-    aux_var <- paste0(aux_var, "_")
-  }
-  aux_formula <- stats::as.formula(
-    paste(aux_var, "~ ."),
-    env = environment(stats::formula(model))
-  )
 
   stats_out <- matrix(
     NA_real_,
@@ -54,21 +63,7 @@ manual_fixest_iv_conditional_reference <- function(model, data, coord_cols, avc,
 
     xj <- as.numeric(n * bread_inv[pos, , drop = TRUE] %*% t(model_mat))
     xjs <- sign(xj)
-    Wx <- Wfin
-    Wx[, 1] <- Wx[, 1] * xj * xjs
-    if (ncol(Wx) > 1L) {
-      for (col in 2:ncol(Wx)) {
-        aux_data[[aux_var]] <- Wfin[, col] * xjs
-        aux_fit <- update(
-          model,
-          aux_formula,
-          data = aux_data,
-          nthreads = 1L,
-          notes = FALSE
-        )
-        Wx[, col] <- stats::residuals(aux_fit) * xj
-      }
-    }
+    Wx <- .orthogonalize_W_iv(Wfin, xj, xjs, residualize = residualize)
 
     Omsx <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
     p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
@@ -172,10 +167,30 @@ test_that("scpc computes critical values when requested", {
 
 test_that("scpc supports clustering with NA rows in the model", {
   dat <- make_scpc_data(with_na = TRUE)
+  dat$lon <- ave(dat$lon, dat$cluster, FUN = mean)
+  dat$lat <- ave(dat$lat, dat$cluster, FUN = mean)
   fit <- stats::lm(y ~ x, data = dat)
 
-  expect_warning(
-    out <- scpc(
+  out <- scpc(
+    fit,
+    dat,
+    coords_euclidean = c("lon", "lat"),
+    cluster = "cluster",
+    ncoef = 1,
+    avc = 0.1,
+    uncond = TRUE
+  )
+
+  expect_s3_class(out, "scpc")
+  expect_equal(nrow(out$scpcstats), 1)
+})
+
+test_that("scpc errors when coordinates vary within clusters", {
+  dat <- make_scpc_data()
+  fit <- stats::lm(y ~ x, data = dat)
+
+  expect_error(
+    scpc(
       fit,
       dat,
       coords_euclidean = c("lon", "lat"),
@@ -186,9 +201,6 @@ test_that("scpc supports clustering with NA rows in the model", {
     ),
     "Coordinates vary within clusters"
   )
-
-  expect_s3_class(out, "scpc")
-  expect_equal(nrow(out$scpcstats), 1)
 })
 
 test_that("scpc validates cluster input and coordinate mode selection", {
@@ -197,7 +209,7 @@ test_that("scpc validates cluster input and coordinate mode selection", {
 
   expect_error(
     scpc(fit, data = dat, coords_euclidean = c("lon", "lat"), cluster = dat$cluster, avc = 0.1, uncond = TRUE),
-    "`cluster` must be a single column name"
+    "`cluster` must be a single non-empty column name"
   )
   expect_error(
     scpc(fit, data = dat, coords_euclidean = c("lon", "lat"), cluster = "nonexistent", avc = 0.1, uncond = TRUE),
@@ -217,7 +229,7 @@ test_that("scpc validates cluster input and coordinate mode selection", {
   )
   expect_error(
     scpc(fit, data = dat, coords_euclidean = "lon", avc = 1, uncond = TRUE),
-    "Option avc\\(\\) must be in \\(0.001, 0.99\\)"
+    "`avc` must lie in \\(0.001, 0.99\\)"
   )
 })
 
@@ -342,7 +354,7 @@ test_that("scpc supports fixest IV models in unconditional and conditional modes
   })
 })
 
-test_that("conditional SCPC for fixest IV matches a manual auxiliary-IV reference", {
+test_that("conditional SCPC for fixest IV matches a direct 2SLS residualization reference", {
   skip_if_not_installed("fixest")
 
   with_fixest_single_thread({

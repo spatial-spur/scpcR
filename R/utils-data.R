@@ -9,15 +9,23 @@
     }
     obs_index <- fixest::obs(model)
   } else if (inherits(model, "lm")) {
-    mf <- stats::model.frame(model)
-    rn <- rownames(mf)
-    suppressWarnings(obs_index <- as.integer(rn))
-    if (anyNA(obs_index)) {
-      obs_index <- match(rn, rownames(data))
-      if (anyNA(obs_index)) {
-        stop("Could not map lm model frame rows back to `data`.")
+    mf_rows <- rownames(stats::model.frame(model))
+    if (!is.null(rownames(data))) {
+      obs_index <- match(mf_rows, rownames(data))
+      if (all(!is.na(obs_index))) {
+        return(obs_index)
       }
     }
+
+    obs_index <- suppressWarnings(as.integer(mf_rows))
+    if (
+      all(!is.na(obs_index)) &&
+      all(obs_index >= 1L) &&
+      all(obs_index <= nrow(data))
+    ) {
+      return(obs_index)
+    }
+    stop("Could not align model estimation sample to data rows.")
   } else {
     stop("Model class not supported. Provide an lm or fixest model.")
   }
@@ -28,17 +36,102 @@
   obs_index
 }
 
-.get_scpc_model_matrix <- function(model) {
-  if (inherits(model, "fixest") && isTRUE(model$iv) && isTRUE(model$iv_stage == 2)) {
-    mm <- tryCatch(
-      utils::getFromNamespace("model.matrix.fixest", "fixest")(model, type = "iv.rhs2"),
-      error = function(e) NULL
+.is_fixest_iv_second_stage <- function(model) {
+  if (!inherits(model, "fixest") || !isTRUE(model$iv)) {
+    return(FALSE)
+  }
+  stage <- tryCatch(as.integer(model$iv_stage[[1L]]), error = function(e) NA_integer_)
+  identical(stage, 2L)
+}
+
+.align_scpc_model_matrix <- function(model_mat, coef_names, context) {
+  model_mat <- as.matrix(model_mat)
+
+  if (length(coef_names) == 0L) {
+    stop(context, " has no coefficients to align.")
+  }
+
+  if (ncol(model_mat) != length(coef_names)) {
+    if (
+      !is.null(colnames(model_mat)) &&
+      all(coef_names %in% colnames(model_mat))
+    ) {
+      model_mat <- model_mat[, coef_names, drop = FALSE]
+    } else {
+      stop(
+        context, " column count cannot be aligned to the coefficient vector ",
+        "(matrix columns = ", ncol(model_mat),
+        ", coefficients = ", length(coef_names), ")."
+      )
+    }
+  } else if (is.null(colnames(model_mat))) {
+    stop(
+      context, " has no column names, so its columns cannot be aligned ",
+      "unambiguously to the coefficient vector."
     )
-    if (!is.null(mm)) {
-      return(mm)
+  } else if (!identical(colnames(model_mat), coef_names)) {
+    if (all(coef_names %in% colnames(model_mat))) {
+      model_mat <- model_mat[, coef_names, drop = FALSE]
+    } else {
+      stop(
+        context, " column names do not align with model coefficients.\n",
+        "Model matrix columns: ", paste(colnames(model_mat), collapse = ", "), "\n",
+        "Coefficient names: ", paste(coef_names, collapse = ", ")
+      )
     }
   }
-  stats::model.matrix(model)
+
+  if (ncol(model_mat) != length(coef_names)) {
+    stop(
+      context, " remains misaligned after column matching ",
+      "(matrix columns = ", ncol(model_mat),
+      ", coefficients = ", length(coef_names), ")."
+    )
+  }
+
+  model_mat
+}
+
+.get_fixest_matrix <- function(model, type, context) {
+  mm <- tryCatch(
+    stats::model.matrix(model, type = type),
+    error = function(e) e
+  )
+  if (inherits(mm, "error")) {
+    stop("Could not extract ", context, ": ", conditionMessage(mm))
+  }
+  as.matrix(mm)
+}
+
+.ensure_iv_intercept <- function(mat, n, include_intercept, context) {
+  mat <- as.matrix(mat)
+  cn <- colnames(mat)
+  has_intercept <- !is.null(cn) && "(Intercept)" %in% cn
+
+  if (isTRUE(include_intercept) && !has_intercept) {
+    mat <- cbind("(Intercept)" = rep(1, n), mat)
+  }
+  if (!isTRUE(include_intercept) && has_intercept) {
+    keep <- cn != "(Intercept)"
+    mat <- mat[, keep, drop = FALSE]
+  }
+
+  cn <- colnames(mat)
+  if (!is.null(cn) && sum(cn == "(Intercept)") > 1L) {
+    stop(context, " contains multiple intercept columns.")
+  }
+
+  mat
+}
+
+.get_scpc_model_matrix <- function(model) {
+  coef_names <- names(stats::coef(model))
+  if (.is_fixest_iv_second_stage(model)) {
+    mm <- .get_fixest_matrix(model, "iv.rhs2", "the fixest IV second-stage model matrix")
+  } else {
+    mm <- stats::model.matrix(model)
+  }
+  .align_scpc_model_matrix(mm, coef_names, "SCPC model matrix")
 }
 
 .has_fixest_fe <- function(model) {
@@ -47,62 +140,59 @@
     length(model$fixef_vars) > 0L
 }
 
-.quote_scpc_name <- function(name) {
-  if (grepl("^[A-Za-z.][A-Za-z0-9._]*$", name)) {
-    return(name)
-  }
-  paste0("`", gsub("`", "\\\\`", name), "`")
-}
-
-.get_fixest_iv_conditional_template <- function(model, data, obs_index, uncond, cluster) {
-  if (isTRUE(uncond) ||
-      !inherits(model, "fixest") ||
-      !isTRUE(model$iv) ||
-      !isTRUE(model$iv_stage == 2) ||
-      !is.null(cluster)) {
-    return(NULL)
+.get_fixest_iv_design <- function(model) {
+  if (!.is_fixest_iv_second_stage(model)) {
+    stop("`.get_fixest_iv_design()` requires a fixest IV second-stage model.")
   }
 
-  data_obs <- data[obs_index, , drop = FALSE]
-  rownames(data_obs) <- seq_len(nrow(data_obs))
-
-  update_fml <- if (.has_fixest_fe(model)) {
-    fe_terms <- paste0("i(", vapply(model$fixef_vars, .quote_scpc_name, character(1)), ")")
-    stats::as.formula(
-      paste(". ~ . +", paste(fe_terms, collapse = " + "), "| 0 | ."),
-      env = environment(stats::formula(model))
-    )
-  } else {
-    . ~ .
-  }
-
-  template <- tryCatch(
-    update(
-      model,
-      update_fml,
-      data = data_obs,
-      nthreads = 1L,
-      notes = FALSE
-    ),
-    error = function(e) e
+  coef_names <- names(stats::coef(model))
+  model_mat <- .align_scpc_model_matrix(
+    .get_fixest_matrix(model, "iv.rhs2", "the fixest IV second-stage model matrix"),
+    coef_names,
+    "fixest IV second-stage model matrix"
   )
-  if (inherits(template, "error")) {
-    stop("Could not build fixest IV conditional template: ", conditionMessage(template))
+
+  exo <- .get_fixest_matrix(model, "iv.exo", "the fixest IV exogenous regressor matrix")
+  endo <- .get_fixest_matrix(model, "iv.endo", "the fixest IV endogenous regressor matrix")
+  inst <- .get_fixest_matrix(model, "iv.inst", "the fixest IV excluded-instrument matrix")
+
+  n <- nrow(model_mat)
+  include_intercept <- !is.null(colnames(model_mat)) &&
+    "(Intercept)" %in% colnames(model_mat)
+
+  exo <- .ensure_iv_intercept(
+    exo,
+    n = n,
+    include_intercept = include_intercept,
+    context = "The fixest IV exogenous regressor matrix"
+  )
+
+  if (!all(c(nrow(exo), nrow(endo), nrow(inst)) == n)) {
+    stop(
+      "Fixest IV design matrices do not share a common row count ",
+      "(model_mat = ", n, ", exo = ", nrow(exo),
+      ", endo = ", nrow(endo), ", inst = ", nrow(inst), ")."
+    )
   }
 
-  bread_inv <- sandwich::bread(template) / nrow(data_obs)
-  model_mat <- .get_scpc_model_matrix(template)
-  if (nrow(model_mat) != nrow(data_obs)) {
-    stop("Internal error: fixest IV conditional template has incompatible row count.")
+  X <- cbind(exo, endo)
+  Z <- cbind(exo, inst)
+
+  if (nrow(X) != n || nrow(Z) != n) {
+    stop("Internal error: fixest IV design matrices have incompatible row counts.")
+  }
+
+  if (any(!is.finite(model_mat)) || any(!is.finite(X)) || any(!is.finite(Z))) {
+    stop("Fixest IV design extraction produced non-finite values.")
   }
 
   list(
-    model = template,
-    data = data_obs,
+    X = X,
+    Z = Z,
     model_mat = model_mat,
-    bread_inv = bread_inv,
-    n = nrow(data_obs),
-    coef_names = names(stats::coef(template))
+    coef_names = coef_names,
+    fixef_id = if (.has_fixest_fe(model)) model$fixef_id else NULL,
+    has_fixef = .has_fixest_fe(model)
   )
 }
 
@@ -112,18 +202,11 @@
     return(setup)
   }
 
-  mm <- as.matrix(model_mat)
-  coef_names <- names(stats::coef(model))
-  if (!is.null(colnames(mm)) && all(coef_names %in% colnames(mm))) {
-    mm <- mm[, coef_names, drop = FALSE]
-  } else if (ncol(mm) == length(coef_names)) {
-    colnames(mm) <- coef_names
-  } else {
-    stop(
-      "Could not align demeaned fixest regressors with model coefficients ",
-      "(coef count = ", length(coef_names), ", demeaned columns = ", ncol(mm), ")."
-    )
-  }
+  mm <- .align_scpc_model_matrix(
+    model_mat,
+    names(stats::coef(model)),
+    "Conditional projection model matrix"
+  )
 
   if (nrow(mm) != n) {
     stop("Internal error: fixest conditional regressors have incompatible row count.")

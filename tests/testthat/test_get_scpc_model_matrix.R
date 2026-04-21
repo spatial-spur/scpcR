@@ -30,5 +30,6 @@ test_that("get_scpc_model_matrix aligns fixest IV regressors with coefficients",
 
     expect_equal(nrow(mm), nobs(fit))
     expect_equal(ncol(mm), length(stats::coef(fit)))
+    expect_equal(colnames(mm), names(stats::coef(fit)))
   })
 })

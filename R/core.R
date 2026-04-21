@@ -21,9 +21,7 @@
 #'   \code{data} for Euclidean coordinates.  Supply either
 #'   \code{lon}/\code{lat} or \code{coords_euclidean}, not both.
 #' @param cluster Optional character string naming a clustering variable
-#'   in \code{data}.  When clustering is used, coordinates are taken from
-#'   the first observation in each cluster; they should be constant
-#'   within clusters.
+#'   in \code{data}. Coordinates must be constant within clusters.
 #' @param ncoef Integer; number of coefficients to report.  Default
 #'   \code{NULL} reports all coefficients.
 #' @param avc Numeric; upper bound on the average pairwise correlation
@@ -95,26 +93,85 @@ scpc <- function(model,
                  uncond = FALSE,
                  cvs = FALSE) {
 
+  if (!is.numeric(avc) || length(avc) != 1L || is.na(avc) || !is.finite(avc)) {
+    stop("`avc` must be a single finite numeric value.")
+  }
   if (avc <= 0.001 || avc >= 0.99) {
-    stop("Option avc() must be in (0.001, 0.99).")
+    stop("`avc` must lie in (0.001, 0.99).")
+  }
+  if (
+    !is.null(ncoef) &&
+    (
+      !is.numeric(ncoef) ||
+      length(ncoef) != 1L ||
+      is.na(ncoef) ||
+      !is.finite(ncoef) ||
+      ncoef <= 0 ||
+      abs(ncoef - round(ncoef)) > 0
+    )
+  ) {
+    stop("`ncoef` must be NULL or a single positive integer.")
+  }
+  if (!is.logical(uncond) || length(uncond) != 1L || is.na(uncond)) {
+    stop("`uncond` must be a single TRUE/FALSE value.")
+  }
+  if (!is.logical(cvs) || length(cvs) != 1L || is.na(cvs)) {
+    stop("`cvs` must be a single TRUE/FALSE value.")
+  }
+  if (!is.null(cluster) && (!is.character(cluster) || length(cluster) != 1L || !nzchar(cluster))) {
+    stop("`cluster` must be a single non-empty column name.")
   }
 
   ## 1. Influence functions --------------------------------------------------
   S <- sandwich::estfun(model)
-  model_mat <- .get_scpc_model_matrix(model)
+  coef_vec <- stats::coef(model)
+  raw_coef_names <- names(coef_vec)
+  is_fixest_iv <- .is_fixest_iv_second_stage(model)
+  iv_cond_design <- NULL
+  if (is_fixest_iv) {
+    iv_cond_design <- .get_fixest_iv_design(model)
+    model_mat <- iv_cond_design$model_mat
+  } else {
+    model_mat <- .get_scpc_model_matrix(model)
+  }
   n <- nrow(S)
   p <- ncol(S)
   neff <- n
   if (nrow(model_mat) != n) {
     stop("Model matrix row count does not match score matrix row count.")
   }
+  if (ncol(model_mat) != p) {
+    stop("Model matrix column count does not match the coefficient vector.")
+  }
 
   obs_index <- .get_obs_index(model, data)
-  iv_cond_setup <- .get_fixest_iv_conditional_template(model, data, obs_index, uncond, cluster)
 
   cond_include_intercept <- TRUE
   cond_fixef_id <- NULL
-  if (is.null(iv_cond_setup)) {
+  model_mat_cond <- model_mat
+  iv_residualizer <- NULL
+  if (!isTRUE(uncond) && is_fixest_iv) {
+    cond_fixef_id <- iv_cond_design$fixef_id
+    if (!is.null(cond_fixef_id)) {
+      model_mat_cond <- .demean_for_scpc(
+        iv_cond_design$model_mat,
+        cond_fixef_id,
+        "fixest IV second-stage model matrix"
+      )
+    }
+    iv_residualizer <- .make_iv_residualizer(
+      iv_cond_design$X,
+      iv_cond_design$Z,
+      fixef_id = cond_fixef_id
+    )
+    if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
+      stop(
+        "Conditional projection matrix dimensions are incompatible with model coefficients ",
+        "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
+        ", expected ", n, " x ", p, ")."
+      )
+    }
+  } else if (!isTRUE(uncond)) {
     cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
     model_mat_cond <- cond_setup$model_mat
     cond_include_intercept <- cond_setup$include_intercept
@@ -133,27 +190,23 @@ scpc <- function(model,
   latlong <- coord_info$latlong
 
   if (!is.null(cluster)) {
-    if (!is.character(cluster) || length(cluster) != 1L || !nzchar(cluster)) {
-      stop("`cluster` must be a single column name.")
-    }
     if (!cluster %in% names(data)) {
       stop("Cluster variable not found in data: ", cluster)
     }
-    if (!is.null(cond_fixef_id) && !isTRUE(uncond)) {
+    if (!is_fixest_iv && !is.null(cond_fixef_id) && !isTRUE(uncond)) {
       stop("Conditional SCPC with absorbed fixed effects and external clustering is not yet implemented; use `uncond = TRUE`.")
     }
     cl_vec <- factor(data[[cluster]][obs_index])
 
-    ## Warn if coordinates vary within clusters
+    ## Coordinates must be constant within clusters.
     coord_by_cl <- rowsum(coords, cl_vec)
     n_per_cl <- as.numeric(table(cl_vec))
     coord_means <- coord_by_cl / n_per_cl
     coord_first <- coords[match(levels(cl_vec), cl_vec), , drop = FALSE]
     if (max(abs(coord_means - coord_first)) > 1e-8) {
-      warning(
-        "Coordinates vary within clusters. The first observation's ",
-        "coordinates are used for each cluster; consider averaging ",
-        "coordinates within clusters before calling scpc()."
+      stop(
+        "Coordinates vary within clusters. Provide coordinates that are constant ",
+        "within each cluster before calling `scpc()`."
       )
     }
 
@@ -181,45 +234,49 @@ scpc <- function(model,
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_mat <- if (cvs) matrix(NA_real_, k_use, 4) else NULL
   cvs_uncond <- if (cvs) vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0) else NULL
-  coef_names <- names(stats::coef(model))[seq_len(k_use)]
+  coef_names <- raw_coef_names[seq_len(k_use)]
   rownames(out) <- coef_names
   colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
   for (j in seq_len(k_use)) {
-    wj <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + stats::coef(model)[j]
+    coef_j <- coef_vec[[j]]
+    wj <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + coef_j
 
     ## unconditional statistic -----------------------------------------------
-    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj) /
-      sqrt(sum((t(Wfin[, -1]) %*% wj)^2)))
-    SE <- as.numeric(sqrt(sum((t(Wfin[, -1]) %*% wj)^2)) / (sqrt(q) * sqrt(neff)))
+    denom <- sqrt(sum((t(Wfin[, -1, drop = FALSE]) %*% wj)^2))
+    if (!is.finite(denom) || denom <= sqrt(.Machine$double.eps)) {
+      stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
+    }
+    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj) / denom)
+    SE <- as.numeric(denom / (sqrt(q) * sqrt(neff)))
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
     ## conditional branch (skip when uncond = TRUE) --------------------------
     if (!uncond) {
       if (!is.null(cluster)) {
-        ## Clustered conditional: individual-level orthogonalization
         xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        Wx <- .orthogonalize_W_cluster(
-          Wfin, cl_vec, xj_indiv, model_mat_cond,
-          include_intercept = cond_include_intercept
-        )
-      } else if (!is.null(iv_cond_setup)) {
-        template_pos <- match(coef_names[[j]], iv_cond_setup$coef_names)
-        if (is.na(template_pos)) {
-          stop(
-            "Could not align fixest IV conditional template with coefficient: ",
-            coef_names[[j]]
+        if (is_fixest_iv) {
+          Wx <- .orthogonalize_W_cluster_iv(
+            Wfin = Wfin,
+            cl_vec = cl_vec,
+            xj_indiv = xj_indiv,
+            residualize = iv_residualizer
+          )
+        } else {
+          ## Clustered conditional: individual-level orthogonalization
+          Wx <- .orthogonalize_W_cluster(
+            Wfin, cl_vec, xj_indiv, model_mat_cond,
+            include_intercept = cond_include_intercept
           )
         }
-        xj <- as.numeric(
-          iv_cond_setup$n * iv_cond_setup$bread_inv[template_pos, , drop = TRUE] %*%
-            t(iv_cond_setup$model_mat)
-        )
+      } else if (is_fixest_iv) {
+        xj <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
         xjs <- sign(xj)
-        Wx <- .orthogonalize_W_fixest_iv(
-          Wfin, xj, xjs,
-          template_model = iv_cond_setup$model,
-          template_data = iv_cond_setup$data
+        Wx <- .orthogonalize_W_iv(
+          Wfin = Wfin,
+          xj = xj,
+          xjs = xjs,
+          residualize = iv_residualizer
         )
       } else {
         ## Non-clustered conditional
@@ -231,6 +288,20 @@ scpc <- function(model,
           fixef_id = cond_fixef_id
         )
       }
+
+      if (!all(is.finite(Wx))) {
+        stop("Conditional projection produced non-finite W values for coefficient: ", coef_names[[j]])
+      }
+      if (nrow(Wx) != nrow(D) || ncol(Wx) != ncol(Wfin)) {
+        stop("Conditional projection produced W with incompatible dimensions for coefficient: ", coef_names[[j]])
+      }
+      if (
+        ncol(Wx) > 1L &&
+        all(colSums(abs(Wx[, -1, drop = FALSE])) <= sqrt(.Machine$double.eps))
+      ) {
+        stop("Conditional projection collapsed all non-constant W columns for coefficient: ", coef_names[[j]])
+      }
+
       Omsx <- .getOms(D, spc$c0, spc$cmax, Wx, 1.2)
       p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx <- .getcv(Omsx, q, 0.05)
@@ -242,9 +313,9 @@ scpc <- function(model,
     }
 
     out[j, ] <- c(
-      stats::coef(model)[j], SE, tau_u, p_final,
-      stats::coef(model)[j] - cv * SE,
-      stats::coef(model)[j] + cv * SE
+      coef_j, SE, tau_u, p_final,
+      coef_j - cv * SE,
+      coef_j + cv * SE
     )
 
     if (cvs) {

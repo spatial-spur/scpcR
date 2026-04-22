@@ -552,3 +552,81 @@ test_that("additional IV parity cases match Stata within tight tolerances", {
     }
   })
 })
+
+test_that("large-n synthetic scenarios match Stata in both unconditional and conditional modes", {
+  ctx <- skip_if_stata_scpc_unavailable()
+  skip_if(
+    !identical(Sys.getenv("SCPCR_RUN_STATA_HEAVY_TESTS", "false"), "true"),
+    "set SCPCR_RUN_STATA_HEAVY_TESTS=true to run large-n Stata parity tests"
+  )
+
+  set.seed(1)
+  n <- 4600
+  dat <- data.frame(
+    y = stats::rnorm(n),
+    x = stats::rnorm(n),
+    lon = stats::runif(n, min = -125, max = -66),
+    lat = stats::runif(n, min = 25, max = 49)
+  )
+  data_path <- tempfile("scpc_large_n_", fileext = ".csv")
+  utils::write.csv(dat, data_path, row.names = FALSE)
+  on.exit(unlink(data_path), add = TRUE)
+
+  run_large_n_case <- function(id, uncond) {
+    stata_stats <- file.path(tempdir(), paste0("stata_stats_", id, ".csv"))
+    on.exit(unlink(stata_stats), add = TRUE)
+
+    opts <- c("latlong", "avc(0.1)", "k(1)")
+    if (isTRUE(uncond)) {
+      opts <- c(opts, "uncond")
+    }
+
+    stata_lines <- c(
+      "clear all",
+      "set more off",
+      sprintf("import delimited \"%s\", varnames(1) clear", data_path),
+      "regress y x, robust",
+      "gen s_1 = lat",
+      "gen s_2 = lon",
+      sprintf("scpc, %s", paste(opts, collapse = " "))
+    )
+
+    stata_out <- run_stata_scpc_lines(
+      stata_lines,
+      write_cvs = FALSE,
+      stata_bin = ctx$stata_bin
+    )
+
+    fit_r <- stats::lm(y ~ x, data = dat)
+    out_r <- scpc(
+      model = fit_r,
+      data = dat,
+      lon = "lon",
+      lat = "lat",
+      ncoef = 2,
+      avc = 0.1,
+      method = "approx",
+      large_n_seed = 1,
+      uncond = uncond,
+      cvs = FALSE
+    )
+
+    expect_table_close(
+      stata_out$stats,
+      normalize_r_scpcstats(out_r),
+      vars = c("coef", "std_err", "t", "p", "ci_low", "ci_high"),
+      tolerance = c(
+        coef = 2e-4,
+        std_err = 2e-4,
+        t = 2e-4,
+        p = 2e-4,
+        ci_low = 2e-4,
+        ci_high = 2e-4
+      ),
+      label = id
+    )
+  }
+
+  run_large_n_case("large_n_uncond", uncond = TRUE)
+  run_large_n_case("large_n_cond", uncond = FALSE)
+})

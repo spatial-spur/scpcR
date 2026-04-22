@@ -141,6 +141,24 @@
     length(model$fixef_vars) > 0L
 }
 
+.permute_fixef_id <- function(fixef_id, perm) {
+  ## the large-n branch reorders rows before it rebuilds the iv
+  ## residualizer. fixest keeps fixed-effect ids outside X and Z, so they
+  ## need the same row order as the permuted design matrices.
+  if (is.null(fixef_id)) {
+    return(NULL)
+  }
+  if (is.list(fixef_id)) {
+    out <- lapply(fixef_id, function(x) x[perm])
+    names(out) <- names(fixef_id)
+    return(out)
+  }
+  if (is.null(dim(fixef_id))) {
+    return(fixef_id[perm])
+  }
+  fixef_id[perm, , drop = FALSE]
+}
+
 .get_fixest_iv_design <- function(model) {
   if (!.is_fixest_iv_second_stage(model)) {
     stop("`.get_fixest_iv_design()` requires a fixest IV second-stage model.")

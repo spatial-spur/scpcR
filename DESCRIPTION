@@ -1,7 +1,7 @@
 Package: scpcR
 Type: Package
 Title: Spatial Correlation-Robust Inference for Regression Coefficients
-Version: 0.1.2
+Version: 0.1.3
 Authors@R: c(
     person("David", "Boll", email = "david.boll@warwick.ac.uk", role = c("aut", "cre")),
     person("Daniel", "Goettlich", email = "daniel.goettlich@econ.uzh.ch", role = "aut")
@@ -11,8 +11,8 @@ Description: Implements spatial correlation-robust procedures for
     Mueller and Watson (2022) <doi:10.3982/ECTA19465> and Mueller and
     Watson (2023) <doi:10.1080/07350015.2022.2127737>.
 License: MIT + file LICENSE
-URL: https://github.com/pdavidboll/scpcR
-BugReports: https://github.com/pdavidboll/scpcR/issues
+URL: https://github.com/spatial-spur/scpcR
+BugReports: https://github.com/spatial-spur/scpcR/issues
 Encoding: UTF-8
 LazyData: true
 RoxygenNote: 7.3.2

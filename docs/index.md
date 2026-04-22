@@ -13,8 +13,10 @@ transformation stage in R, see `spuR`.
 remotes::install_github("spatial-spur/scpcR@v0.1.3")
 ```
 
-but is easiest to use as dependency of the `spuR` package:
+If you want to use `scpcR` through the full `spuR` workflow, install both
+tagged releases explicitly:
 ```r
+remotes::install_github("spatial-spur/scpcR@v0.1.3")
 remotes::install_github("spatial-spur/spuR@v0.1.2")
 ```
 
@@ -73,7 +75,7 @@ step.
 
 ## spuR integration
 
-`scpcR` is also a dependency of the `spuR` package, so in particular, you can apply `scpc`
+`spuR` uses `scpcR` internally, so in particular, you can apply `scpc`
 as part of the pipeline using:
 
 ```r

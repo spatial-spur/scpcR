@@ -22,17 +22,19 @@ remotes::install_github("spatial-spur/spuR@v0.1.2")
 
 ## Example: Chetty Dataset
 
-`scpcR` needs:
+In this example, we walk you through the SCPC inference workflow step-by-step.
+SCPC is the inference stage of the SPUR workflow, so we start from a fitted
+regression model. We also provide a one-stop [pipeline wrapper](#pipeline-wrapper)
+if you want to run the full SPUR workflow in one step.
 
-- a fitted model
-- the data used to fit that model
-- spatial coordinates supplied either as `lon` / `lat` or as Euclidean
-  coordinates
+### Data preparation
 
-The example below uses `spur_example` from `spuR`.
+For illustration, we load the Chetty dataset from `spuR`. Of course, the
+analysis in principle follows the same logic on any other dataset. In this
+specific case, we first omit the non-contiguous US states. We also drop rows
+with missing values.
 
 ```r
-library(scpcR)
 library(spuR)
 
 data(spur_example)
@@ -44,9 +46,24 @@ df <- subset(
 )
 
 df <- stats::na.omit(df)
+```
+
+### Fitting the regression
+
+SCPC needs a fitted model, the data used to fit that model, and spatial
+coordinates supplied either as `lon` / `lat` or as Euclidean coordinates.
+
+```r
+library(scpcR)
 
 fit <- stats::lm(am ~ gini + fracblack, data = df)
+```
 
+### Running SCPC inference
+
+We suggest applying SCPC inference after estimating the regression:
+
+```r
 out <- scpc(
   fit,
   data = df,
@@ -55,28 +72,22 @@ out <- scpc(
 )
 
 summary(out)
-coef(out)
-confint(out)
 ```
 
-- `fit` is the fitted model
-- `data` is the underlying data frame
-- `lon` and `lat` identify the coordinate columns
+### Interpreting the output
+
+`summary(out)` prints the main SCPC inference table. You can also use
+`coef(out)` to extract coefficient estimates and `confint(out)` to extract
+confidence intervals.
 
 If your coordinates are Euclidean rather than geographic, use
 `coords_euclidean = c(...)` instead of `lon` and `lat`.
 
-`summary(out)` prints the main SCPC inference table. `coef(out)` extracts the
-coefficient estimates, and `confint(out)` extracts confidence intervals.
+### Pipeline wrapper
 
-If you need the diagnostic and transformation stage before inference, the
-easiest entry point is `spuR`, which uses `scpcR` internally for the inference
-step.
-
-## spuR integration
-
-`spuR` uses `scpcR` internally, so in particular, you can apply `scpc`
-as part of the pipeline using:
+As a shortcut to implementing the full SPUR workflow manually, use the `spuR`
+pipeline wrapper. It runs the diagnostics, transformation, and SCPC inference
+steps in one call.
 
 ```r
 result <- spuR::spur(
@@ -87,11 +98,11 @@ result <- spuR::spur(
 )
 ```
 
-The `scpc` stats in the result object can be accessed using:
+The nested SCPC results can be printed directly:
 
 ```
-result$fits$levels$scpc$scpcstats
-result$fits$transformed$scpc$scpcstats
+summary(result$fits$levels$scpc)
+summary(result$fits$transformed$scpc)
 ```
 
 ## Next Step

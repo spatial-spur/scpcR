@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="SPUR logo">
+</p>
+
 # scpcR
 
 `scpcR` provides spatial correlation-robust inference for regression coefficients

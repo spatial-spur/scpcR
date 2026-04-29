@@ -45,9 +45,8 @@ fit <- lm(y ~ x, data = dat)
 out <- scpcR::scpc(
   fit,
   data = dat,
-  coords_euclidean = c("lon", "lat"),
-  avc = 0.1,
-  uncond = TRUE
+  lon = "lon",
+  lat = "lat"
 )
 
 summary(out)

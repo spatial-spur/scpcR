@@ -22,7 +22,7 @@ If you encounter any issues or have any questions, please open an issue on GitHu
 
 ## Installation
 
-Install the development version from GitHub with:
+Install the latest release version from GitHub with:
 
 ```r
 remotes::install_github("spatial-spur/scpcR@v0.1.3")

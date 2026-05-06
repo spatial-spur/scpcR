@@ -1,4 +1,10 @@
+<div class="package-overview-header" markdown="1">
+
 # scpcR
+
+[GitHub repository](https://github.com/spatial-spur/scpcR){ .md-button }
+
+</div>
 
 `scpcR` provides the SCPC inference stage of the SPUR workflow for
 cross-sectional regressions with spatial dependence. For the diagnostic and

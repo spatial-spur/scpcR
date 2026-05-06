@@ -4,9 +4,9 @@
 
 # scpcR
 
-`scpcR` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in R based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
+`scpcR` provides spatial correlation-robust inference for regression coefficients following Müller & Watson 2022 and Müller & Watson 2023, implemented in R based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
 
-**Citation:** If you use this package, please cite `bbv2026`, `mw2022`, and `mw2023`. See [CITATION.cff](CITATION.cff) for copyable citation metadata.
+**Citation:** If you use this package, please cite Becker et al. 2026, Müller & Watson 2022, and Müller & Watson 2023. See [CITATION.bib](CITATION.bib) for the BibTeX entries.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 

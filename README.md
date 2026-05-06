@@ -6,17 +6,7 @@
 
 `scpcR` provides spatial correlation-robust inference for regression coefficients following Müller and Watson (2022, 2023), implemented in R based on their [original Stata implementation](https://github.com/ukmueller/SCPC).
 
-**When using this code, please cite [Becker, Boll and Voth (2026)](https://pauldavidboll.com/SPUR_Stata_Journal_website.pdf):**
-
-```bibtex
-@Article{becker2026,
-  author    = {Becker, Sascha O. and Boll, P. David and Voth, Hans-Joachim},
-  title     = {Testing and Correcting for Spatial Unit Roots in Regression Analysis},
-  journal   = {Stata Journal},
-  year      = {forthcoming},
-  note      = {Forthcoming}
-}
-```
+**Citation:** If you use this package, please cite [Becker et al. 2026](CITATION.cff), [Müller & Watson 2022](CITATION.cff), and [Müller & Watson 2023](CITATION.cff). See [CITATION.cff](CITATION.cff) for copyable citation metadata.
 
 If you encounter any issues or have any questions, please open an issue on GitHub or contact the authors.
 
@@ -58,7 +48,7 @@ Please refer to [the package documentation](https://spatial-spur.github.io/scpcR
 
 ## References
 
-Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", Forthcoming at the Stata Journal.
+Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting for Spatial Unit Roots in Regression Analysis", The Stata Journal, in press.
 
 Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference", Econometrica 90(6) (2022), 2901–2935. https://www.princeton.edu/~umueller/SHAR.pdf.
 

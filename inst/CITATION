@@ -1,5 +1,19 @@
 bibentry(
   bibtype  = "Article",
+  title    = "Testing and Correcting for Spatial Unit Roots in Regression Analysis",
+  author   = c(
+    person("Sascha O.", "Becker"),
+    person("P. David", "Boll"),
+    person("Hans-Joachim", "Voth")
+  ),
+  journal  = "The Stata Journal",
+  year     = "2026",
+  note     = "In press",
+  url      = "https://wrap.warwick.ac.uk/id/eprint/194576/"
+)
+
+bibentry(
+  bibtype  = "Article",
   title    = "Spatial Correlation Robust Inference",
   author   = c(
     person("Ulrich K.", "Mueller"),

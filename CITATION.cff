@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+message: "If you use scpcR, please cite Becker, Boll, and Voth (2026), Mueller and Watson (2022), and Mueller and Watson (2023)."
+title: "scpcR: Spatial Correlation-Robust Inference for Regression Coefficients"
+version: "0.1.3"
+license: MIT
+repository-code: "https://github.com/spatial-spur/scpcR"
+url: "https://github.com/spatial-spur/scpcR"
+abstract: "R implementation of SCPC spatial correlation-robust inference for regression coefficients."
+authors:
+  - family-names: Boll
+    given-names: David
+  - family-names: Goettlich
+    given-names: Daniel
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Becker
+      given-names: "Sascha O."
+    - family-names: Boll
+      given-names: "P. David"
+    - family-names: Voth
+      given-names: "Hans-Joachim"
+  title: "Testing and Correcting for Spatial Unit Roots in Regression Analysis"
+  journal: "The Stata Journal"
+  year: 2026
+  notes: "In press"
+  url: "https://wrap.warwick.ac.uk/id/eprint/194576/"
+references:
+  - type: article
+    authors:
+      - family-names: Mueller
+        given-names: "Ulrich K."
+      - family-names: Watson
+        given-names: "Mark W."
+    title: "Spatial Correlation Robust Inference"
+    journal: Econometrica
+    year: 2022
+    volume: 90
+    issue: 6
+    start: 2901
+    end: 2935
+    doi: "10.3982/ECTA19465"
+  - type: article
+    authors:
+      - family-names: Mueller
+        given-names: "Ulrich K."
+      - family-names: Watson
+        given-names: "Mark W."
+    title: "Spatial Correlation Robust Inference in Linear Regression and Panel Models"
+    journal: "Journal of Business & Economic Statistics"
+    year: 2023
+    volume: 41
+    issue: 4
+    start: 1050
+    end: 1064
+    doi: "10.1080/07350015.2022.2127737"

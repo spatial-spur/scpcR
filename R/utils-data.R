@@ -38,7 +38,7 @@
 
 .is_fixest_iv_second_stage <- function(model) {
   # fix: current fixest marks iv models with is_iv, so use that flag here.
-  if (!inherits(model, "fixest") || !isTRUE(model$is_iv)) {
+  if (!inherits(model, "fixest") || !(isTRUE(model$is_iv) || isTRUE(model$iv))) {
     return(FALSE)
   }
   stage <- tryCatch(as.integer(model$iv_stage[[1L]]), error = function(e) NA_integer_)
@@ -264,20 +264,25 @@
     if (length(miss) > 0) {
       stop("Coordinate variables not found in data: ", paste(miss, collapse = ", "))
     }
-    coords <- data[obs_index, c(lon, lat), drop = FALSE]
-    if (!all(vapply(coords, is.numeric, logical(1)))) {
+    lon_col <- data[[lon]]
+    lat_col <- data[[lat]]
+    if (!is.numeric(lon_col) || !is.numeric(lat_col)) {
       stop("`lon` and `lat` must reference numeric columns.")
     }
-    if (any(!is.finite(as.matrix(coords)))) {
+    lon_vec <- as.double(lon_col[obs_index])
+    lat_vec <- as.double(lat_col[obs_index])
+    if (!all(is.finite(lon_vec)) || !all(is.finite(lat_vec))) {
       stop("Geodesic coordinates must be finite.")
     }
-    if (any(coords[[lon]] < -180 | coords[[lon]] > 180)) {
+    if (any(lon_vec < -180 | lon_vec > 180)) {
       stop("Longitude values must be in [-180, 180].")
     }
-    if (any(coords[[lat]] < -90 | coords[[lat]] > 90)) {
+    if (any(lat_vec < -90 | lat_vec > 90)) {
       stop("Latitude values must be in [-90, 90].")
     }
-    return(list(coords = as.matrix(coords), latlong = TRUE))
+    coords_mat <- cbind(lon_vec, lat_vec)
+    colnames(coords_mat) <- c(lon, lat)
+    return(list(coords = coords_mat, latlong = TRUE))
   }
 
   if (!is.character(coords_euclidean) || length(coords_euclidean) < 1L) {

@@ -256,38 +256,89 @@ scpc <- function(model,
   out <- matrix(NA_real_, k_use, 6)
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_mat <- if (cvs) matrix(NA_real_, k_use, 4) else NULL
-  cvs_uncond <- if (cvs) vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0) else NULL
+  cvs_uncond <- if (cvs) .getcv(Omsfin, q, levs) else NULL
   coef_names <- raw_coef_names[seq_len(k_use)]
   rownames(out) <- coef_names
   colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
+  bread_sub <- neff * bread_inv[seq_len(k_use), , drop = FALSE]
+  W_mat <- tcrossprod(S, bread_sub)
+  X_mat <- if (!uncond) tcrossprod(model_mat_cond, bread_sub) else NULL
+
+  cl_vec_scpc <- NULL
+  ols_residualizer <- NULL
+  iv_residualizer_use <- iv_residualizer
+  model_mat_cond_use <- model_mat_cond
+  cond_fixef_id_use <- cond_fixef_id
+
+  if (!uncond) {
+    if (!is.null(cluster)) {
+      cl_vec_scpc <- if (!identical(perm, seq_len(length(perm)))) {
+        factor(as.character(cl_vec), levels = levels(cl_vec)[perm])
+      } else {
+        cl_vec
+      }
+      if (!is_fixest_iv && ncol(Wfin) > 1L) {
+        ols_residualizer <- .make_ols_residualizer(
+          model_mat_cond,
+          include_intercept = cond_include_intercept
+        )
+      }
+    } else if (is_fixest_iv) {
+      if (isTRUE(spc$large_n)) {
+        iv_residualizer_use <- .make_iv_residualizer(
+          iv_cond_design$X[perm, , drop = FALSE],
+          iv_cond_design$Z[perm, , drop = FALSE],
+          fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm)
+        )
+      }
+    } else {
+      if (isTRUE(spc$large_n)) {
+        model_mat_cond_use <- model_mat_cond[perm, , drop = FALSE]
+        cond_fixef_id_use <- .permute_fixef_id(cond_fixef_id, perm)
+      }
+      if (ncol(Wfin) > 1L) {
+        ols_residualizer <- .make_ols_residualizer(
+          model_mat_cond_use,
+          include_intercept = cond_include_intercept,
+          fixef_id = cond_fixef_id_use
+        )
+      }
+    }
+  }
+
+  Wfin_1 <- Wfin[, 1]
+  Wfin_rest <- Wfin[, -1, drop = FALSE]
+  sqrt_q <- sqrt(q)
+  sqrt_neff <- sqrt(neff)
+
+  tau_u_vec <- numeric(k_use)
+  se_vec <- numeric(k_use)
+  p_u_vec <- numeric(k_use)
+  Wx_list <- if (!uncond) vector("list", k_use) else NULL
+
   for (j in seq_len(k_use)) {
     coef_j <- coef_vec[[j]]
-    wj <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + coef_j
+    wj <- W_mat[, j] + coef_j
     wj_perm <- wj[perm]
 
     ## unconditional statistic -----------------------------------------------
-    denom <- sqrt(sum((t(Wfin[, -1, drop = FALSE]) %*% wj_perm)^2))
+    denom <- sqrt(sum(crossprod(Wfin_rest, wj_perm)^2))
     if (!is.finite(denom) || denom <= sqrt(.Machine$double.eps)) {
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
-    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj_perm) / denom)
-    SE <- as.numeric(denom / (sqrt(q) * sqrt(neff)))
-    p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
+    tau_u <- as.numeric(sqrt_q * sum(Wfin_1 * wj_perm) / denom)
+    SE <- as.numeric(denom / (sqrt_q * sqrt_neff))
+    p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt_q)$max
+
+    tau_u_vec[j] <- tau_u
+    se_vec[j] <- SE
+    p_u_vec[j] <- p_u
 
     ## conditional branch (skip when uncond = TRUE) --------------------------
     if (!uncond) {
-      cl_vec_scpc <- NULL
       if (!is.null(cluster)) {
-        cl_vec_scpc <- if (!identical(perm, seq_len(length(perm)))) {
-          factor(as.character(cl_vec), levels = levels(cl_vec)[perm])
-        } else {
-          cl_vec
-        }
-      }
-
-      if (!is.null(cluster)) {
-        xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
+        xj_indiv <- X_mat[, j]
         if (is_fixest_iv) {
           Wx <- .orthogonalize_W_cluster_iv(
             Wfin = Wfin,
@@ -299,45 +350,32 @@ scpc <- function(model,
           ## Clustered conditional: individual-level orthogonalization
           Wx <- .orthogonalize_W_cluster(
             Wfin, cl_vec_scpc, xj_indiv, model_mat_cond,
-            include_intercept = cond_include_intercept
+            include_intercept = cond_include_intercept,
+            residualize = ols_residualizer
           )
         }
       } else if (is_fixest_iv) {
-        xj_raw <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        if (isTRUE(spc$large_n)) {
-          residualize <- .make_iv_residualizer(
-            iv_cond_design$X[perm, , drop = FALSE],
-            iv_cond_design$Z[perm, , drop = FALSE],
-            fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm)
-          )
-          xj <- xj_raw[perm]
-        } else {
-          residualize <- iv_residualizer
-          xj <- xj_raw
-        }
+        xj_raw <- X_mat[, j]
+        xj <- if (isTRUE(spc$large_n)) xj_raw[perm] else xj_raw
         xjs <- sign(xj)
         Wx <- .orthogonalize_W_iv(
           Wfin = Wfin,
           xj = xj,
           xjs = xjs,
-          residualize = residualize
+          residualize = iv_residualizer_use
         )
       } else {
         ## Non-clustered conditional
-        xj <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        model_mat_cond_j <- model_mat_cond
+        xj <- X_mat[, j]
         if (isTRUE(spc$large_n)) {
           xj <- xj[perm]
-          model_mat_cond_j <- model_mat_cond[perm, , drop = FALSE]
-          cond_fixef_id_j <- .permute_fixef_id(cond_fixef_id, perm)
-        } else {
-          cond_fixef_id_j <- cond_fixef_id
         }
         xjs <- sign(xj)
         Wx <- .orthogonalize_W(
-          Wfin, xj, xjs, model_mat_cond_j,
+          Wfin, xj, xjs, model_mat_cond_use,
           include_intercept = cond_include_intercept,
-          fixef_id = cond_fixef_id_j
+          fixef_id = cond_fixef_id_use,
+          residualize = ols_residualizer
         )
       }
 
@@ -354,16 +392,51 @@ scpc <- function(model,
         stop("Conditional projection collapsed all non-constant W columns for coefficient: ", coef_names[[j]])
       }
 
-      omsx_res <- .get_conditional_Oms(
-        spc,
-        Wx,
-        latlong = latlong,
-        random_state = large_n_random_state
-      )
-      Omsx <- omsx_res$Oms
-      large_n_random_state <- omsx_res$random_state
-      p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
-      cvx <- .getcv(Omsx, q, 0.05)
+      storage.mode(Wx) <- "double"
+      Wx_list[[j]] <- Wx
+    }
+  }
+
+  Omsx_batch <- NULL
+  if (!uncond && !isTRUE(spc$large_n)) {
+    storage.mode(spc$distmat) <- "double"
+    Omsx_batch <- .Call(
+      "cpp_get_oms_batch",
+      spc$distmat,
+      as.double(spc$c0),
+      as.double(spc$cmax),
+      Wx_list,
+      1.2,
+      PACKAGE = "scpcR"
+    )
+  }
+
+  for (j in seq_len(k_use)) {
+    coef_j <- coef_vec[[j]]
+    SE <- se_vec[j]
+    tau_u <- tau_u_vec[j]
+    p_u <- p_u_vec[j]
+
+    if (!uncond) {
+      if (isTRUE(spc$large_n)) {
+        omsx_res <- .get_conditional_Oms(
+          spc,
+          Wx_list[[j]],
+          latlong = latlong,
+          random_state = large_n_random_state
+        )
+        Omsx <- omsx_res$Oms
+        large_n_random_state <- omsx_res$random_state
+      } else {
+        Omsx <- Omsx_batch[[j]]
+      }
+      p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt_q)$max
+      if (cvs) {
+        cvs_cond <- .getcv(Omsx, q, levs)
+        cvx <- cvs_cond[[3L]]
+      } else {
+        cvx <- .getcv(Omsx, q, 0.05)
+      }
       p_final <- max(p_u, p_c)
       cv <- max(cvfin, cvx)
     } else {
@@ -380,7 +453,6 @@ scpc <- function(model,
     if (cvs) {
       cvs_vec <- cvs_uncond
       if (!uncond) {
-        cvs_cond <- vapply(levs, function(lv) .getcv(Omsx, q, lv), 0.0)
         cvs_vec <- pmax(cvs_vec, cvs_cond)
       }
       cvs_mat[j, ] <- cvs_vec

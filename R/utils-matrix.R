@@ -4,32 +4,24 @@
 
 .lvech <- function(mat) {
   ## Lower-triangular elements as a vector
-  mat[lower.tri(mat)]
+  mat <- as.matrix(mat)
+  storage.mode(mat) <- "double"
+  .Call("cpp_lvech", mat, PACKAGE = "scpcR")
 }
 
 .demeanmat <- function(mat) {
   ## Double-demean a matrix (row and column means removed)
-  mat <- mat - rowMeans(mat)
-  mat <- mat - matrix(colMeans(mat), nrow(mat), ncol(mat), byrow = TRUE)
-  mat
+  mat <- as.matrix(mat)
+  storage.mode(mat) <- "double"
+  .Call("cpp_demeanmat", mat, PACKAGE = "scpcR")
 }
 
 .getW <- function(distmat, c0, qmax) {
   ## First qmax eigenvectors of demeaned Sigma(c0), prepended with
   ## a normalised constant vector.  All columns have unit length.
-  n <- nrow(distmat)
-  Sig <- exp(-c0 * distmat)
-  Sig_d <- .demeanmat(Sig)
-  if (requireNamespace("RSpectra", quietly = TRUE) && qmax < n - 1) {
-    eig <- RSpectra::eigs_sym(Sig_d, k = qmax, which = "LA")
-    ord <- order(Re(eig$values), decreasing = TRUE)
-    V <- eig$vectors[, ord, drop = FALSE]
-  } else {
-    eig <- eigen(Sig_d, symmetric = TRUE)
-    ord <- order(Re(eig$values), decreasing = TRUE)
-    V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
-  }
-  cbind(rep(1, n) / sqrt(n), V)
+  distmat <- as.matrix(distmat)
+  storage.mode(distmat) <- "double"
+  .Call("cpp_getW", distmat, as.double(c0), as.integer(qmax), PACKAGE = "scpcR")
 }
 
 .gettau <- function(y, W) {
@@ -163,19 +155,21 @@
 # ---------------------------------------------------------------------------
 # Orthogonalisation helper (conditional SCPC)
 # ---------------------------------------------------------------------------
-.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL) {
+.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL, residualize = NULL) {
   Wx <- W
   Wx[, 1] <- Wx[, 1] * xj * xjs
 
   if (ncol(Wx) > 1L) {
-    residualize <- .make_ols_residualizer(
-      model_mat,
-      include_intercept = include_intercept,
-      fixef_id = fixef_id
-    )
-    Rx <- sweep(Wx[, -1, drop = FALSE], 1, xjs, `*`)
+    if (is.null(residualize)) {
+      residualize <- .make_ols_residualizer(
+        model_mat,
+        include_intercept = include_intercept,
+        fixef_id = fixef_id
+      )
+    }
+    Rx <- Wx[, -1, drop = FALSE] * xjs
     Rr <- residualize(Rx)
-    Wx[, -1] <- sweep(Rr, 1, xj, `*`)
+    Wx[, -1] <- Rr * xj
   }
   Wx
 }
@@ -195,9 +189,9 @@
   Wx[, 1] <- Wfin[, 1] * xj * xjs
 
   if (ncol(Wfin) > 1L) {
-    Y <- sweep(Wfin[, -1, drop = FALSE], 1, xjs, `*`)
+    Y <- Wfin[, -1, drop = FALSE] * xjs
     R <- residualize(Y)
-    Wx[, -1] <- sweep(R, 1, xj, `*`)
+    Wx[, -1] <- R * xj
   }
 
   if (!all(is.finite(Wx))) {
@@ -211,7 +205,7 @@
 # Orthogonalisation helper (conditional SCPC, clustered)
 # ---------------------------------------------------------------------------
 .orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
-                                     include_intercept = TRUE) {
+                                     include_intercept = TRUE, residualize = NULL) {
   ## Construct the conditional Wx matrix for clustered SCPC following the
   ## Stata set_Wx_cluster algorithm (Mueller & Watson):
   ##   1. Within-cluster normalization of influence directions
@@ -242,13 +236,15 @@
 
   ## Columns > 1: orthogonalize at individual level, aggregate back
   if (ncol_W > 1L) {
-    residualize <- .make_ols_residualizer(
-      model_mat_indiv,
-      include_intercept = include_intercept
-    )
-    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xjs_indiv, `*`)
+    if (is.null(residualize)) {
+      residualize <- .make_ols_residualizer(
+        model_mat_indiv,
+        include_intercept = include_intercept
+      )
+    }
+    Y <- W_indiv[, -1, drop = FALSE] * xjs_indiv
     R <- residualize(Y)
-    Wx[, -1] <- rowsum(sweep(R, 1, xj_indiv, `*`), cl_vec)
+    Wx[, -1] <- rowsum(R * xj_indiv, cl_vec)
   }
 
   Wx
@@ -276,9 +272,9 @@
   Wx[, 1] <- as.numeric(rowsum(W_indiv[, 1] * xjs_indiv * xj_indiv, cl_vec))
 
   if (ncol_W > 1L) {
-    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xjs_indiv, `*`)
+    Y <- W_indiv[, -1, drop = FALSE] * xjs_indiv
     R <- residualize(Y)
-    Wx[, -1] <- rowsum(sweep(R, 1, xj_indiv, `*`), cl_vec)
+    Wx[, -1] <- rowsum(R * xj_indiv, cl_vec)
   }
 
   if (!all(is.finite(Wx))) {

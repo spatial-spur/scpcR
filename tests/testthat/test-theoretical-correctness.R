@@ -116,6 +116,13 @@ test_that("angular probabilities match independent adaptive integration", {
 })
 
 test_that("quadrature remains accurate for extreme tails and covariance scales", {
+  for (pair in list(c(60L, 1e3), c(120L, 20), c(300L, 10))) {
+    q <- pair[1]; cv <- pair[2]
+    actual <- .getrp(diag(q + 1L), cv)
+    expected <- 2 * pt(-sqrt(q) * cv, q)
+    expect_gt(actual, 0)
+    expect_lt(abs(actual / expected - 1), 1e-9)
+  }
   for (q in c(2L, 30L, 120L, 300L)) {
     for (cv in c(1e-8, 0.1, 1, 10)) {
       expect_lt(abs(.getrp(diag(q + 1L), cv) - 2 * pt(-sqrt(q) * cv, q)), 2e-10)

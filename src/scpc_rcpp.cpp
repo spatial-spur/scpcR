@@ -704,12 +704,23 @@ struct AngularRuleCache {
   }
 };
 
-// Every factor is in [0, 1], so the product cannot overflow. If the product
-// underflows, its square root is below about 1e-161, far below the integration
-// error budget. This avoids a logarithm for every eigenvalue at every node.
+// Every factor is in [0, 1], so the product cannot overflow. The rare
+// logarithmic fallback preserves representable tiny probabilities when their
+// squared integrand would underflow, without logarithms on the ordinary path.
 inline double angular_integrand(double cosine2, const double* eigenvalues, int n) {
   double product = 1.0;
   for (int i = 0; i < n; ++i) product *= cosine2 / (cosine2 + eigenvalues[i]);
+  if (product < std::numeric_limits<double>::min()) {
+    double log_product = 0.0;
+    const double log_cosine2 = std::log(cosine2);
+    for (int i = 0; i < n; ++i) {
+      const double value = eigenvalues[i];
+      log_product += value > cosine2 ?
+          std::log(value) - log_cosine2 + std::log1p(cosine2 / value) :
+          std::log1p(value / cosine2);
+    }
+    return std::exp(-0.5 * log_product);
+  }
   return std::sqrt(product);
 }
 

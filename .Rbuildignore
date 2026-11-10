@@ -11,3 +11,6 @@
 ^scpcR_.*\.tar\.gz$
 ^\.claude$
 ^\.github$
+^docs$
+^CITATION\.bib$
+^CITATION\.cff$

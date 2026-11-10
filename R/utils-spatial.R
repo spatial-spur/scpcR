@@ -12,7 +12,7 @@
 
 .getdistmat <- function(S, latlong, nthreads = .get_scpc_threads()) {
   ## Distance matrix from coordinates.
-  ## latlong = TRUE: haversine distances in units of pi * R_earth.
+  ## latlong = TRUE: haversine distances as fractions of Earth's circumference.
   ## latlong = FALSE: Euclidean distances.
   S <- as.matrix(S)
   if (latlong && ncol(S) != 2L) {
@@ -253,9 +253,11 @@
 
   if (identical(method_actual, "exact")) {
     distmat <- .getdistmat(coords, latlong)
+    correlation_floor <- (sum(distmat == 0) - n) / (n * (n - 1))
+    minavc_target <- correlation_floor + (1 - correlation_floor) * minavc
     c_pair <- as.numeric(rcpp_getc0_from_distmat(
       distmat,
-      as.double(c(avc0, minavc))
+      as.double(c(avc0, minavc_target))
     ))
     c0 <- c_pair[[1L]]
     cmax <- c_pair[[2L]]

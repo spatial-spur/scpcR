@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cctype>
+#include <string>
 #include <limits>
 #include <vector>
 
@@ -39,22 +41,24 @@ void vvsqrt(double* y, const double* x, const int* n);
 namespace {
 
 inline int resolve_scpc_threads(int requested = -1) {
-  if (requested > 0) return requested;
   const char* cran = std::getenv("_R_CHECK_LIMIT_CORES_");
-  if (cran != nullptr && *cran != '\0') return 2;
-  const char* env = std::getenv("SCPCR_NUM_THREADS");
-  if (env != nullptr && *env != '\0') {
-    char* end;
-    long val = std::strtol(env, &end, 10);
-    if (end != env && *end == '\0' && val > 0) return static_cast<int>(val);
+  std::string limit = cran == nullptr ? "" : cran;
+  std::transform(limit.begin(), limit.end(), limit.begin(), [](unsigned char c) { return std::tolower(c); });
+  const bool limited = !limit.empty() && limit != "false" && limit != "no" && limit != "0";
+  int count = requested;
+  if (count <= 0) {
+    for (const char* key : {"SCPCR_NUM_THREADS", "RCPP_PARALLEL_NUM_THREADS"}) {
+      const char* value = std::getenv(key);
+      if (value == nullptr || *value == '\0') continue;
+      char* end;
+      long parsed = std::strtol(value, &end, 10);
+      if (end != value && *end == '\0' && parsed > 0 && parsed <= std::numeric_limits<int>::max()) {
+        count = static_cast<int>(parsed);
+        break;
+      }
+    }
   }
-  env = std::getenv("RCPP_PARALLEL_NUM_THREADS");
-  if (env != nullptr && *env != '\0') {
-    char* end;
-    long val = std::strtol(env, &end, 10);
-    if (end != env && *end == '\0' && val > 0) return static_cast<int>(val);
-  }
-  return -1;
+  return limited ? (count > 0 ? std::min(count, 2) : 2) : count;
 }
 
 template <typename WorkerType>
@@ -309,6 +313,61 @@ void compute_distmat_raw_serial(const double* s, int n, int d, bool latlong, dou
   symmetrize_lower_to_upper_blocked(out, n);
 }
 
+// Project a bounded row block with the same metric as the subsample covariance.
+void compute_cross_kernel(const double* S, int n, int d, const double* sub,
+                          int m, bool latlong, double neg_c, double* out, int row_begin, int rows) {
+  const double radians = M_PI / 180.0;
+  std::vector<double> lat_rad, cos_lat;
+  if (latlong) {
+    lat_rad.resize(rows);
+    cos_lat.resize(rows);
+    for (int row = 0; row < rows; ++row) {
+      lat_rad[row] = S[row_begin + row + n] * radians;
+      cos_lat[row] = std::cos(lat_rad[row]);
+    }
+  }
+  for (int j = 0; j < m; ++j) {
+    double* col = out + static_cast<size_t>(j) * rows;
+    if (latlong) {
+      const double lat_j = sub[j + m] * radians;
+      const double cos_j = std::cos(lat_j);
+      for (int row = 0; row < rows; ++row) {
+        const int i = row_begin + row;
+        const double dlat = std::sin(0.5 * (lat_rad[row] - lat_j));
+        const double dlon = std::sin(0.5 * (S[i] - sub[j]) * radians);
+        const double h = dlat * dlat + cos_lat[row] * cos_j * dlon * dlon;
+        col[row] = neg_c * std::asin(std::sqrt(std::max(0.0, std::min(1.0, h)))) / M_PI;
+      }
+    } else if (d == 2) {
+      const double* x = S + row_begin;
+      const double* y = S + n + row_begin;
+      const double sx = sub[j];
+      const double sy = sub[j + m];
+      for (int row = 0; row < rows; ++row) {
+        const double dx = x[row] - sx;
+        const double dy = y[row] - sy;
+        col[row] = neg_c * std::sqrt(dx * dx + dy * dy);
+      }
+    } else {
+      for (int row = 0; row < rows; ++row) {
+        const int i = row_begin + row;
+        double squared = 0.0;
+        for (int k = 0; k < d; ++k) {
+          const double diff = S[i + static_cast<size_t>(k) * n] - sub[j + static_cast<size_t>(k) * m];
+          squared += diff * diff;
+        }
+        col[row] = neg_c * std::sqrt(squared);
+      }
+    }
+    // Keep exponentiation separate so distance arithmetic can vectorize.
+#ifdef __APPLE__
+    vvexp(col, col, &rows);
+#else
+    for (int row = 0; row < rows; ++row) col[row] = std::exp(col[row]);
+#endif
+  }
+}
+
 void compute_distmat_raw(const double* s, int n, int d, bool latlong, double* out, int nthreads = -1) {
   if (n < 384) {
     compute_distmat_raw_serial(s, n, d, latlong, out);
@@ -403,6 +462,17 @@ void solve_c0_from_avc_core(const double* vd,
                             const double* avc_targets,
                             int n_targets,
                             double* out) {
+  if (m == 0) Rcpp::stop("At least two distinct locations are required.");
+  double distance_sum = 0.0;
+  size_t zero_count = 0;
+  for (size_t i = 0; i < m; ++i) {
+    if (!std::isfinite(vd[i]) || vd[i] < 0.0) Rcpp::stop("Distances must be finite and non-negative.");
+    distance_sum += vd[i];
+    if (vd[i] == 0.0) ++zero_count;
+  }
+  const double mean_distance = distance_sum / static_cast<double>(m);
+  if (!(mean_distance > 0.0) || !std::isfinite(mean_distance)) Rcpp::stop("At least two distinct locations are required.");
+  const double correlation_floor = static_cast<double>(zero_count) / static_cast<double>(m);
   const double inv_m = 1.0 / static_cast<double>(m);
   constexpr int CHUNK = 2048;
   double arg_buf[CHUNK];
@@ -505,25 +575,29 @@ void solve_c0_from_avc_core(const double* vd,
 
   for (int t = 0; t < n_targets; ++t) {
     const double avc0 = avc_targets[t];
-    double c0 = 10.0;
-    double c1 = 10.0;
+    if (!std::isfinite(avc0) || avc0 <= correlation_floor || avc0 >= 1.0) {
+      Rcpp::stop("Target correlation must lie above the co-located-pair fraction and below one.");
+    }
+    double c0 = 1.0 / mean_distance;
+    double c1 = c0;
     while (is_below(c0, avc0)) {
       c1 = c0;
       c0 = 0.5 * c0;
     }
-    while (c1 < 5000.0 && is_above(c1, avc0)) {
+    while (is_above(c1, avc0)) {
       c0 = c1;
       c1 = 2.0 * c1;
+      if (!std::isfinite(c1)) Rcpp::stop("Spatial scale is not representable.");
     }
-    double c = std::sqrt(c0 * c1);
+    double c = std::sqrt(c0) * std::sqrt(c1);
     while (true) {
-      c = std::sqrt(c0 * c1);
+      c = std::sqrt(c0) * std::sqrt(c1);
       if (is_above(c, avc0)) {
         c0 = c;
       } else {
         c1 = c;
       }
-      if (c1 - c0 < 0.001) break;
+      if (c1 - c0 <= 1e-12 * c1) break;
     }
     out[t] = c;
   }
@@ -591,37 +665,50 @@ double eval_getrp_submatrix(const double* om_full,
     }
   }
 
-  if (n_neg == 0 || !std::isfinite(denom) || denom <= 0.0) {
-    return 0.0;
-  }
+  if (!std::isfinite(denom) || denom <= 0.0) return 0.0;
+  if (n_neg == 0) return 1.0;
 
   const double inv_denom = 1.0 / denom;
-  for (int i = 0; i < n_neg; ++i) {
-    ws.evals[i] *= inv_denom;
+  for (int i = 0; i < n_neg; ++i) ws.evals[i] *= inv_denom;
+  if (n_neg == 1) {
+    // Ratio of two independent chi-square(1) variables: exact Cauchy tail.
+    return (2.0 / M_PI) * std::atan(1.0 / std::sqrt(ws.evals[0]));
   }
 
-  double tot = 0.0;
-  const double* ev = ws.evals.data();
-  for (int j = 0; j < n_gq; ++j) {
-    const double u = gqx[j];
-    const double one_minus_u2 = 1.0 - u * u;
-    const double inv_one_minus_u2 = 1.0 / one_minus_u2;
-    double prod = 1.0;
-    for (int l = 0; l < n_neg; ++l) {
-      prod *= (1.0 + ev[l] * inv_one_minus_u2);
-    }
-    double arg = one_minus_u2 * prod;
-    if (!std::isfinite(arg)) {
-      double sum_log = 0.0;
-      for (int l = 0; l < n_neg; ++l) {
-        sum_log += std::log1p(ev[l] * inv_one_minus_u2);
+  // u = sin(theta) removes the artificial endpoint singularity in the
+  // original integral. Refine in theta to resolve probabilities near one.
+  auto integrate = [&](double left, double right) {
+    double total = 0.0;
+    for (int j = 0; j < n_gq; ++j) {
+      const double theta = left + (right - left) * gqx[j];
+      const double cosine = std::cos(theta);
+      const double cosine2 = cosine * cosine;
+      double log_product = 0.0;
+      for (int i = 0; i < n_neg; ++i) {
+        log_product += std::log1p(ws.evals[i] / cosine2);
       }
-      arg = one_minus_u2 * std::exp(sum_log);
+      total += gqw[j] * std::exp(-0.5 * log_product);
     }
-    if (!std::isfinite(arg) || arg <= 0.0) continue;
-    tot += gqw[j] / std::sqrt(arg);
+    return (right - left) * total;
+  };
+  struct Interval { double left, right, whole, tolerance; int depth; };
+  const double end = 0.5 * M_PI;
+  std::vector<Interval> pending{{0.0, end, integrate(0.0, end), 1e-11, 0}};
+  double total = 0.0;
+  while (!pending.empty()) {
+    const Interval current = pending.back();
+    pending.pop_back();
+    const double mid = 0.5 * (current.left + current.right);
+    const double left = integrate(current.left, mid);
+    const double right = integrate(mid, current.right);
+    if (std::abs(left + right - current.whole) <= current.tolerance || current.depth >= 20) {
+      total += left + right;
+    } else {
+      pending.push_back({mid, current.right, right, current.tolerance * 0.5, current.depth + 1});
+      pending.push_back({current.left, mid, left, current.tolerance * 0.5, current.depth + 1});
+    }
   }
-  return tot * (2.0 / M_PI);
+  return std::max(0.0, std::min(1.0, total * (2.0 / M_PI)));
 }
 
 void eval_maxrp_core(const std::vector<const double*>& oms_ptrs,
@@ -666,7 +753,7 @@ double eval_getcv_core(const std::vector<const double*>& oms_ptrs,
   const int k = q + 1;
   const double sqrt_q = std::sqrt(static_cast<double>(q));
   const double inv_sqrt_q = 1.0 / sqrt_q;
-  const double tol = 0.001 * inv_sqrt_q;
+  const double tol = 1e-9 * inv_sqrt_q;
 
   double rp = 1.0;
   int i = 0;
@@ -1152,6 +1239,7 @@ struct LnSubsampleWallWorker : public RcppParallel::Worker {
   int m;
   int capN;
   int qmax;
+  bool latlong;
   double neg_c0;
   double* Wall;
 
@@ -1163,6 +1251,7 @@ struct LnSubsampleWallWorker : public RcppParallel::Worker {
                         int m_,
                         int capN_,
                         int qmax_,
+                        bool latlong_,
                         double neg_c0_,
                         double* Wall_)
       : S(S_),
@@ -1173,14 +1262,15 @@ struct LnSubsampleWallWorker : public RcppParallel::Worker {
         m(m_),
         capN(capN_),
         qmax(qmax_),
+        latlong(latlong_),
         neg_c0(neg_c0_),
         Wall(Wall_) {}
 
   void operator()(std::size_t begin, std::size_t end) override {
     std::vector<double> sig_d(static_cast<size_t>(m) * m);
     std::vector<double> W0(static_cast<size_t>(m) * qmax);
-    std::vector<double> K_mat(static_cast<size_t>(n) * m);
-    std::vector<double> Wx(static_cast<size_t>(n) * qmax);
+    constexpr int KERNEL_ROWS = 256;
+    std::vector<double> K_mat(static_cast<size_t>(std::min(n, KERNEL_ROWS)) * m);
 
     const char trans_n = 'N';
     const double alpha = 1.0;
@@ -1197,58 +1287,20 @@ struct LnSubsampleWallWorker : public RcppParallel::Worker {
       demean_rect_inplace(sig_d.data(), m, m);
       compute_top_k_evecs_sym(sig_d.data(), m, qmax, W0.data());
 
-      if (d == 2) {
-        const double* s0 = S;
-        const double* s1 = S + n;
-        const double* c0_col = sub_coords;
-        const double* c1_col = sub_coords + m;
-        for (int j = 0; j < m; ++j) {
-          const double cx = c0_col[j];
-          const double cy = c1_col[j];
-          double* k_col = K_mat.data() + static_cast<size_t>(j) * n;
-          for (int i = 0; i < n; ++i) {
-            const double dx = s0[i] - cx;
-            const double dy = s1[i] - cy;
-            k_col[i] = neg_c0 * std::sqrt(dx * dx + dy * dy);
-          }
-#ifdef __APPLE__
-          vvexp(k_col, k_col, &n);
-#else
-          for (int i = 0; i < n; ++i) {
-            k_col[i] = std::exp(k_col[i]);
-          }
-#endif
-        }
-      } else {
-        for (int j = 0; j < m; ++j) {
-          double* k_col = K_mat.data() + static_cast<size_t>(j) * n;
-          for (int i = 0; i < n; ++i) {
-            double sum_sq = 0.0;
-            for (int col_d = 0; col_d < d; ++col_d) {
-              const double diff =
-                  S[i + static_cast<size_t>(col_d) * n] - sub_coords[j + static_cast<size_t>(col_d) * m];
-              sum_sq += diff * diff;
-            }
-            k_col[i] = neg_c0 * std::sqrt(sum_sq);
-          }
-#ifdef __APPLE__
-          vvexp(k_col, k_col, &n);
-#else
-          for (int i = 0; i < n; ++i) {
-            k_col[i] = std::exp(k_col[i]);
-          }
-#endif
-        }
-      }
-
-      const arma::blas_int n_b = n;
       const arma::blas_int qmax_b = qmax;
       const arma::blas_int m_b = m;
-      arma::blas::gemm<double>(&trans_n, &trans_n, &n_b, &qmax_b, &m_b, &alpha,
-                               K_mat.data(), &n_b, W0.data(), &m_b, &beta, Wx.data(), &n_b);
+      const arma::blas_int wall_stride = n * capN;
+      for (int row0 = 0; row0 < n; row0 += KERNEL_ROWS) {
+        const int rows = std::min(KERNEL_ROWS, n - row0);
+        const arma::blas_int rows_b = rows;
+        compute_cross_kernel(S, n, d, sub_coords, m, latlong, neg_c0, K_mat.data(), row0, rows);
+        arma::blas::gemm<double>(&trans_n, &trans_n, &rows_b, &qmax_b, &m_b, &alpha,
+                                 K_mat.data(), &rows_b, W0.data(), &m_b, &beta,
+                                 Wall + static_cast<size_t>(idx) * n + row0, &wall_stride);
+      }
 
       for (int q = 0; q < qmax; ++q) {
-        double* wx_col = Wx.data() + static_cast<size_t>(q) * n;
+        double* wx_col = Wall + static_cast<size_t>(q * capN + idx) * n;
         double csum = 0.0;
         for (int i = 0; i < n; ++i) {
           csum += wx_col[i];
@@ -1264,10 +1316,7 @@ struct LnSubsampleWallWorker : public RcppParallel::Worker {
         if (!std::isfinite(norm) || norm == 0.0) norm = 1.0;
         const double inv_norm = 1.0 / norm;
 
-        double* dst_col = Wall + static_cast<size_t>(q * capN + idx) * n;
-        for (int i = 0; i < n; ++i) {
-          dst_col[i] = wx_col[i] * inv_norm;
-        }
+        for (int i = 0; i < n; ++i) wx_col[i] *= inv_norm;
       }
     }
   }
@@ -2028,7 +2077,7 @@ Rcpp::List rcpp_jumble_s(const arma::mat& s, int m, double random_t) {
   constexpr double INV_2POW32 = 1.0 / 4294967296.0;
   for (int i = 0; i < m; ++i) {
     rt = (64389ULL * rt + 1ULL) & 0xFFFFFFFFULL;
-    const int j = static_cast<int>(std::floor(static_cast<double>(n) * (static_cast<double>(rt) * INV_2POW32)));
+    const int j = i + static_cast<int>(std::floor(static_cast<double>(n - i) * (static_cast<double>(rt) * INV_2POW32)));
     if (j != i) {
       for (int k = 0; k < d; ++k) {
         std::swap(r_ptr[i + static_cast<size_t>(k) * n], r_ptr[j + static_cast<size_t>(k) * n]);
@@ -2066,7 +2115,7 @@ Rcpp::List rcpp_lnset_wc0(const arma::mat& S,
   for (int idx = 0; idx < capN; ++idx) {
     for (int i = 0; i < m; ++i) {
       rt = (64389ULL * rt + 1ULL) & 0xFFFFFFFFULL;
-      const int j = static_cast<int>(std::floor(static_cast<double>(n) * (static_cast<double>(rt) * INV_2POW32)));
+      const int j = i + static_cast<int>(std::floor(static_cast<double>(n - i) * (static_cast<double>(rt) * INV_2POW32)));
       if (j != i) {
         for (int k = 0; k < d; ++k) {
           std::swap(r[i + static_cast<size_t>(k) * n], r[j + static_cast<size_t>(k) * n]);
@@ -2110,7 +2159,9 @@ Rcpp::List rcpp_lnset_wc0(const arma::mat& S,
   std::vector<EvalPoint> history;
   history.reserve(64);
 
-  const double targets[2] = {avc0, minavc};
+  const double floor_corr = static_cast<double>(std::count(distvec.begin(), distvec.end(), 0.0)) /
+      static_cast<double>(total_len);
+  const double targets[2] = {avc0, floor_corr + (1.0 - floor_corr) * minavc};
   double c_out[2] = {0.0, 0.0};
   solve_c0_from_avc_core(distvec.data(), total_len, bins, history, targets, 2, c_out);
   const double c0 = c_out[0];
@@ -2122,7 +2173,7 @@ Rcpp::List rcpp_lnset_wc0(const arma::mat& S,
   std::vector<double> Wall(static_cast<size_t>(n) * total_wall_cols);
   LnSubsampleWallWorker wall_worker(
       S.memptr(), sub_coords_all.data(), sub_dist_all.data(),
-      n, d, m, capN, qmax, neg_c0, Wall.data());
+      n, d, m, capN, qmax, latlong, neg_c0, Wall.data());
   if (capN > 1) {
     scpc_parallel_for(0, static_cast<std::size_t>(capN), wall_worker, 1, nthreads);
   } else {
@@ -2199,6 +2250,7 @@ Rcpp::List rcpp_lnget_oms(const arma::mat& S,
   const int n = static_cast<int>(S.n_rows);
   const int d = static_cast<int>(S.n_cols);
   const int k_cols = static_cast<int>(W.n_cols);
+  const arma::mat gram = W.t() * W;
   uint64_t rt = static_cast<uint64_t>(random_t);
 
   const int nc = std::max(2, static_cast<int>(std::ceil(std::log(cmax / c0) / std::log(cgridfac))));
@@ -2246,6 +2298,8 @@ Rcpp::List rcpp_lnget_oms(const arma::mat& S,
       std::memcpy(om.memptr(),
                   oms_all.data() + static_cast<size_t>(r) * k_cols * k_cols,
                   static_cast<size_t>(k_cols) * k_cols * sizeof(double));
+      om += gram;
+      om.diag() -= 1.0;
       oms_list[r] = om;
     }
 
@@ -2314,7 +2368,7 @@ Rcpp::List rcpp_lnget_oms(const arma::mat& S,
       for (int row = 0; row < k_cols; ++row) {
         const double sym_sum = acc_r[row + static_cast<size_t>(col) * k_cols] +
                                acc_r[col + static_cast<size_t>(row) * k_cols];
-        om_ptr[row + static_cast<size_t>(col) * k_cols] = (row == col ? 1.0 : 0.0) + scale * sym_sum;
+        om_ptr[row + static_cast<size_t>(col) * k_cols] = gram(row, col) + scale * sym_sum;
       }
     }
     oms_list[r] = om;

@@ -1,5 +1,5 @@
 CXX_STD = CXX17
-PKG_CXXFLAGS = -O3 -DARMA_USE_CURRENT -DARMA_NO_DEBUG -DARMA_DONT_USE_OPENMP
+PKG_CXXFLAGS = -DARMA_USE_CURRENT -DARMA_NO_DEBUG -DARMA_DONT_USE_OPENMP
 UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(UNAME_S),Darwin)
   PKG_LIBS = -framework Accelerate $(shell "${R_HOME}/bin/Rscript" -e "RcppParallel::RcppParallelLibs()")

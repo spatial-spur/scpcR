@@ -47,29 +47,12 @@ test_that("native C++ matrix and spatial helpers match pure-R reference implemen
   dv_med <- .lvech(D_med) # length = 5995 >= 4096
   expect_equal(.getavc(3.5, dv_med), mean(exp(-3.5 * dv_med)), tolerance = 1e-14)
 
-  ref_getc0 <- function(dist, avc0) {
-    c0 <- c1 <- 10
-    while (mean(exp(-c0 * dist)) < avc0) {
-      c1 <- c0
-      c0 <- 0.5 * c0
-    }
-    while (mean(exp(-c1 * dist)) > avc0 & c1 < 5000) {
-      c0 <- c1
-      c1 <- 2 * c1
-    }
-    repeat {
-      c_val <- sqrt(c0 * c1)
-      if (mean(exp(-c_val * dist)) > avc0) c0 <- c_val else c1 <- c_val
-      if (c1 - c0 < 0.001) break
-    }
-    c_val
-  }
-  c0_ref <- ref_getc0(dv_med, 0.03)
-  cmax_ref <- ref_getc0(dv_med, 0.00001)
-  expect_equal(.getc0fromavc(dv_med, 0.03), c0_ref, tolerance = 1e-12)
-  expect_equal(.getc0fromavc(dv_med, 0.00001), cmax_ref, tolerance = 1e-12)
+  targets <- c(0.03, 0.00001)
   c_pair <- as.numeric(rcpp_getc0_from_distmat(D_med, c(0.03, 0.00001)))
-  expect_equal(c_pair, c(c0_ref, cmax_ref), tolerance = 1e-12)
+  for (i in seq_along(targets)) {
+    expect_equal(mean(exp(-c_pair[i] * dv_med)), targets[i], tolerance = 1e-10)
+    expect_equal(.getc0fromavc(dv_med, targets[i]), c_pair[i], tolerance = 1e-10)
+  }
 
   # 4. .getOms, rcpp_get_oms_batch, .getrp, .maxrp, .getcv, .setfinalW
   qmax <- 8L

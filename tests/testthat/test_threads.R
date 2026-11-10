@@ -69,3 +69,24 @@ test_that("scpc(..., nthreads = 1) parameter and single-threaded execution match
   expect_equal(res_single$scpccvs, res_multi$scpccvs, tolerance = 1e-14)
   expect_equal(res_single$cv, res_multi$cv, tolerance = 1e-14)
 })
+
+
+test_that("CRAN cap applies to explicit, option, and environment thread settings", {
+  withr::local_envvar(c("_R_CHECK_LIMIT_CORES_" = "TRUE", "SCPCR_NUM_THREADS" = "8"))
+  withr::local_options(list(scpcR.threads = 8L))
+  expect_equal(.get_scpc_threads(8L), 2L)
+  expect_equal(scpc_get_num_threads(), 2L)
+  options(scpcR.threads = NULL)
+  expect_equal(scpc_get_num_threads(), 2L)
+  Sys.setenv("_R_CHECK_LIMIT_CORES_" = "FALSE")
+  expect_equal(scpc_get_num_threads(), 8L)
+  expect_error(.get_scpc_threads(2^40), "positive integer")
+})
+
+test_that("thread setter restores automatic detection without pinning a count", {
+  withr::local_options(list(scpcR.threads = NULL))
+  old <- scpc_set_num_threads(1L)
+  expect_null(old)
+  scpc_set_num_threads(old)
+  expect_null(getOption("scpcR.threads"))
+})

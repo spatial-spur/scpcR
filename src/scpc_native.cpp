@@ -112,30 +112,56 @@ void demean_rect_inplace(double* mat, int r, int c) {
   }
 }
 
+// Unit-sphere positions let the ordinary great-circle cross-kernel use
+// arithmetic on chords instead of repeating sine/cosine for every pair.
+void spherical_positions(const double* coords, int n, double* unit) {
+  const double radians = M_PI / 180.0;
+  for (int i = 0; i < n; ++i) {
+    const double longitude = coords[i] * radians;
+    const double latitude = coords[i + n] * radians;
+    const double cosine = std::cos(latitude);
+    unit[i] = cosine * std::cos(longitude);
+    unit[i + n] = cosine * std::sin(longitude);
+    unit[i + 2 * n] = std::sin(latitude);
+  }
+}
+
 // Project a bounded row block with the same metric as the subsample covariance.
 void compute_cross_kernel(const double* S, int n, int d, const double* sub,
-                          int m, bool latlong, double neg_c, double* out, int row_begin, int rows) {
+                          int m, bool latlong, double neg_c, const double* unit,
+                          const double* sub_unit, double* out, int row_begin, int rows) {
   const double radians = M_PI / 180.0;
-  std::vector<double> lat_rad, cos_lat;
-  if (latlong) {
-    lat_rad.resize(rows);
-    cos_lat.resize(rows);
-    for (int row = 0; row < rows; ++row) {
-      lat_rad[row] = S[row_begin + row + n] * radians;
-      cos_lat[row] = std::cos(lat_rad[row]);
-    }
-  }
   for (int j = 0; j < m; ++j) {
     double* col = out + static_cast<size_t>(j) * rows;
     if (latlong) {
-      const double lat_j = sub[j + m] * radians;
-      const double cos_j = std::cos(lat_j);
+      const double sx = sub_unit[j];
+      const double sy = sub_unit[j + m];
+      const double sz = sub_unit[j + 2 * m];
       for (int row = 0; row < rows; ++row) {
         const int i = row_begin + row;
-        const double dlat = std::sin(0.5 * (lat_rad[row] - lat_j));
-        const double dlon = std::sin(0.5 * (S[i] - sub[j]) * radians);
-        const double h = dlat * dlat + cos_lat[row] * cos_j * dlon * dlon;
-        col[row] = neg_c * std::asin(std::sqrt(std::max(0.0, std::min(1.0, h)))) / M_PI;
+        const double x = unit[i], y = unit[i + n], z = unit[i + 2 * n];
+        const double dx = x - sx, dy = y - sy, dz = z - sz;
+        const double chord2 = dx * dx + dy * dy + dz * dz;
+        double distance;
+        if (chord2 < 1e-8) {
+          // Subtract raw degrees before conversion to retain accuracy for
+          // co-located/nearby points, including points across the dateline.
+          const double dlat = std::sin(0.5 * (S[i + n] - sub[j + m]) * radians);
+          const double dlon = std::sin(0.5 * std::remainder(S[i] - sub[j], 360.0) * radians);
+          const double h = dlat * dlat + std::cos(S[i + n] * radians) *
+              std::cos(sub[j + m] * radians) * dlon * dlon;
+          distance = std::asin(std::sqrt(std::max(0.0, std::min(1.0, h)))) / M_PI;
+        } else if (chord2 > 4.0 - 1e-8) {
+          // asin(chord/2) loses angular precision near antipodes.
+          const double cx = y * sz - z * sy;
+          const double cy = z * sx - x * sz;
+          const double cz = x * sy - y * sx;
+          distance = std::atan2(std::sqrt(cx * cx + cy * cy + cz * cz),
+                                x * sx + y * sy + z * sz) / (2.0 * M_PI);
+        } else {
+          distance = std::asin(0.5 * std::sqrt(chord2)) / M_PI;
+        }
+        col[row] = neg_c * distance;
       }
     } else if (d == 2) {
       const double* x = S + row_begin;
@@ -158,7 +184,6 @@ void compute_cross_kernel(const double* S, int n, int d, const double* sub,
         col[row] = neg_c * std::sqrt(squared);
       }
     }
-    // Keep exponentiation separate so distance arithmetic can vectorize.
 #ifdef __APPLE__
     vvexp(col, col, &rows);
 #else
@@ -230,6 +255,60 @@ void compute_distmat_raw(const double* s, int n, int d, bool latlong, double* ou
     }
   }
   symmetrize_lower_to_upper_blocked(out, n);
+}
+
+struct RootBracket {
+  double lower;
+  double upper;
+  double value_upper;
+};
+
+// Illinois interpolation with a bisection safeguard. Retain the enclosing
+// bracket and its conservative upper endpoint; interpolation changes the work,
+// not the requested absolute/relative accuracy.
+template <typename Evaluate>
+RootBracket refine_monotone_root(double lower, double upper,
+                                  double value_lower, double value_upper,
+                                  double target, double absolute_tolerance,
+                                  double relative_tolerance, Evaluate evaluate) {
+  if (value_lower == target) return {lower, lower, value_lower};
+  if (value_upper == target) return {upper, upper, value_upper};
+  double weight_lower = value_lower - target;
+  double weight_upper = value_upper - target;
+  double checkpoint_width = upper - lower;
+  int interpolation_steps = 0;
+  int last_side = 0;
+  while (upper - lower > absolute_tolerance + relative_tolerance * upper) {
+    bool bisect = false;
+    if (interpolation_steps == 3) {
+      bisect = upper - lower > 0.5 * checkpoint_width;
+      checkpoint_width = upper - lower;
+      interpolation_steps = 0;
+    }
+    double candidate = bisect ? lower + 0.5 * (upper - lower) :
+        lower + (upper - lower) * (weight_lower / (weight_lower - weight_upper));
+    if (!(candidate > lower && candidate < upper)) candidate = lower + 0.5 * (upper - lower);
+    // Adjacent floating-point endpoints cannot be refined further.
+    if (!(candidate > lower && candidate < upper)) break;
+    const double value = evaluate(candidate);
+    if (!std::isfinite(value)) throw std::runtime_error("Non-finite value during monotone solve.");
+    if (value == target) return {candidate, candidate, value};
+    if (value > target) {
+      lower = candidate;
+      value_lower = value;
+      weight_lower = value - target;
+      weight_upper = last_side == 1 ? 0.5 * weight_upper : value_upper - target;
+      last_side = 1;
+    } else {
+      upper = candidate;
+      value_upper = value;
+      weight_upper = value - target;
+      weight_lower = last_side == -1 ? 0.5 * weight_lower : value_lower - target;
+      last_side = -1;
+    }
+    ++interpolation_steps;
+  }
+  return {lower, upper, value_upper};
 }
 
 struct HistBin {
@@ -424,18 +503,61 @@ void solve_c0_from_avc_core(const double* vd,
       c1 = 2.0 * c1;
       if (!std::isfinite(c1)) throw std::runtime_error("Spatial scale is not representable.");
     }
-    double c = std::sqrt(c0) * std::sqrt(c1);
-    while (true) {
-      c = std::sqrt(c0) * std::sqrt(c1);
-      if (is_above(c, avc0)) {
-        c0 = c;
-      } else {
-        c1 = c;
-      }
-      if (c1 - c0 <= 1e-12 * c1) break;
-    }
-    out[t] = c;
+    const RootBracket root = refine_monotone_root(
+        c0, c1, eval_mean_exp(c0), eval_mean_exp(c1), avc0, 0.0, 1e-12, eval_mean_exp);
+    out[t] = root.upper;
   }
+}
+
+// Cache the first three angular panels across all root evaluations in a
+// workspace. The rule itself is checked so callers can safely replace it.
+struct AngularRuleCache {
+  std::vector<double> nodes;
+  std::vector<double> weights;
+  std::vector<double> cosine_squared;
+  std::vector<double> sine_squared;
+  void prepare(const double* x, const double* w, int n) {
+    if (static_cast<int>(nodes.size()) == n &&
+        std::equal(nodes.begin(), nodes.end(), x) &&
+        std::equal(weights.begin(), weights.end(), w)) return;
+    nodes.assign(x, x + n);
+    weights.assign(w, w + n);
+    cosine_squared.resize(static_cast<size_t>(3) * n);
+    sine_squared.resize(static_cast<size_t>(3) * n);
+    const double end = 0.5 * M_PI;
+    for (int panel = 0; panel < 3; ++panel) {
+      const double left = panel == 2 ? 0.5 * end : 0.0;
+      const double width = panel == 0 ? end : 0.5 * end;
+      for (int j = 0; j < n; ++j) {
+        const double angle = left + width * x[j];
+        const double cosine = std::cos(angle), sine = std::sin(angle);
+        cosine_squared[static_cast<size_t>(panel) * n + j] = cosine * cosine;
+        sine_squared[static_cast<size_t>(panel) * n + j] = sine * sine;
+      }
+    }
+  }
+};
+
+// Every factor is in [0, 1], so the product cannot overflow. If the product
+// underflows, its square root is below about 1e-161, far below the integration
+// error budget. This avoids a logarithm for every eigenvalue at every node.
+inline double angular_integrand(double cosine2, const double* eigenvalues, int n) {
+  double product = 1.0;
+  for (int i = 0; i < n; ++i) product *= cosine2 / (cosine2 + eigenvalues[i]);
+  return std::sqrt(product);
+}
+
+// Stable complement of the square root of a product of factors in [0, 1].
+inline double angular_deficit(double sine2, double denominator,
+                               const double* normalized_eigenvalues, int n) {
+  double product = 1.0, deficit = 0.0;
+  for (int i = 0; i < n; ++i) {
+    const double extra = normalized_eigenvalues[i] * denominator;
+    const double inverse = 1.0 / (sine2 + extra);
+    deficit += product * extra * inverse;
+    product *= sine2 * inverse;
+  }
+  return deficit / ((1.0 + std::sqrt(product)) * denominator);
 }
 
 struct RpWorkspace {
@@ -444,6 +566,7 @@ struct RpWorkspace {
   std::vector<double> wi;
   std::vector<double> work;
   std::vector<double> evals;
+  AngularRuleCache angular;
 
   void ensure(int k) {
     if (static_cast<int>(wr.size()) < k) {
@@ -503,39 +626,53 @@ double eval_getrp_submatrix(const double* om_full,
   if (!std::isfinite(denom) || denom <= 0.0) return 0.0;
   if (n_neg == 0) return 1.0;
 
-  const double inv_denom = 1.0 / denom;
-  for (int i = 0; i < n_neg; ++i) ws.evals[i] *= inv_denom;
+  for (int i = 0; i < n_neg; ++i) ws.evals[i] /= denom;
   if (n_neg == 1) {
     // Ratio of two independent chi-square(1) variables: exact Cauchy tail.
     return (2.0 / M_PI) * std::atan(1.0 / std::sqrt(ws.evals[0]));
   }
 
-  // u = sin(theta) removes the artificial endpoint singularity in the
-  // original integral. Refine in theta to resolve probabilities near one.
-  auto integrate = [&](double left, double right) {
+  // The angular integral is smooth at its endpoints for ordinary cutoffs.
+  // Near probability one, rescale its complement using cot(theta) = k*tan(phi),
+  // k^2 = sum(eigenvalues). This resolves the otherwise invisible endpoint
+  // boundary layer without subtracting nearly equal factors in the integrand.
+  double scale2 = 0.0;
+  for (int i = 0; i < n_neg; ++i) scale2 += ws.evals[i];
+  if (scale2 == 0.0) return 1.0;
+  const bool complement = scale2 < 0.0625;
+  if (complement) for (int i = 0; i < n_neg; ++i) ws.evals[i] /= scale2;
+  ws.angular.prepare(gqx, gqw, n_gq);
+  auto integrate = [&](double left, double right, int panel = -1) {
     double total = 0.0;
     for (int j = 0; j < n_gq; ++j) {
-      const double theta = left + (right - left) * gqx[j];
-      const double cosine = std::cos(theta);
-      const double cosine2 = cosine * cosine;
-      double log_product = 0.0;
-      for (int i = 0; i < n_neg; ++i) {
-        log_product += std::log1p(ws.evals[i] / cosine2);
+      double cosine2, sine2 = 0.0;
+      if (panel >= 0) {
+        const size_t index = static_cast<size_t>(panel) * n_gq + j;
+        cosine2 = ws.angular.cosine_squared[index];
+        if (complement) sine2 = ws.angular.sine_squared[index];
+      } else {
+        const double angle = left + (right - left) * gqx[j];
+        const double cosine = std::cos(angle);
+        cosine2 = cosine * cosine;
+        if (complement) { const double sine = std::sin(angle); sine2 = sine * sine; }
       }
-      total += gqw[j] * std::exp(-0.5 * log_product);
+      const double value = complement ?
+          angular_deficit(sine2, cosine2 + scale2 * sine2, ws.evals.data(), n_neg) :
+          angular_integrand(cosine2, ws.evals.data(), n_neg);
+      total += gqw[j] * value;
     }
     return (right - left) * total;
   };
   struct Interval { double left, right, whole, tolerance; int depth; };
   const double end = 0.5 * M_PI;
-  std::vector<Interval> pending{{0.0, end, integrate(0.0, end), 1e-11, 0}};
+  std::vector<Interval> pending{{0.0, end, integrate(0.0, end, 0), 1e-11, 0}};
   double total = 0.0;
   while (!pending.empty()) {
     const Interval current = pending.back();
     pending.pop_back();
     const double mid = 0.5 * (current.left + current.right);
-    const double left = integrate(current.left, mid);
-    const double right = integrate(mid, current.right);
+    const double left = integrate(current.left, mid, current.depth == 0 ? 1 : -1);
+    const double right = integrate(mid, current.right, current.depth == 0 ? 2 : -1);
     if (std::abs(left + right - current.whole) <= current.tolerance || current.depth >= 20) {
       total += left + right;
     } else {
@@ -543,7 +680,9 @@ double eval_getrp_submatrix(const double* om_full,
       pending.push_back({current.left, mid, left, current.tolerance * 0.5, current.depth + 1});
     }
   }
-  return std::max(0.0, std::min(1.0, total * (2.0 / M_PI)));
+  const double probability = complement ?
+      1.0 - std::sqrt(scale2) * total * (2.0 / M_PI) : total * (2.0 / M_PI);
+  return std::max(0.0, std::min(1.0, probability));
 }
 
 void eval_maxrp_core(const std::vector<const double*>& oms_ptrs,
@@ -598,6 +737,7 @@ double eval_getcv_core(const std::vector<const double*>& oms_ptrs,
   while (rp > level) {
     cv1 = cv0;
     double rp_cv1 = rp;
+    double rp_cv0 = rp;
     if (!first_iter) {
       // At cv1 == cv0, we already know getrp(Oms[i], cv1) == rp > level
       cv0 = cv1;
@@ -608,6 +748,7 @@ double eval_getcv_core(const std::vector<const double*>& oms_ptrs,
     while (true) {
       rp_cv1 = eval_getrp_submatrix(oms_ptrs[i], oms_lds[i], k, cv1, gqx, gqw, n_gq, ws);
       if (rp_cv1 > level) {
+        rp_cv0 = rp_cv1;
         cv0 = cv1;
         cv1 = cv1 + inv_sqrt_q;
       } else {
@@ -615,16 +756,11 @@ double eval_getcv_core(const std::vector<const double*>& oms_ptrs,
       }
     }
 
-    while (cv1 - cv0 > tol) {
-      const double cv = 0.5 * (cv0 + cv1);
-      const double rp_mid = eval_getrp_submatrix(oms_ptrs[i], oms_lds[i], k, cv, gqx, gqw, n_gq, ws);
-      if (rp_mid > level) {
-        cv0 = cv;
-      } else {
-        cv1 = cv;
-        rp_cv1 = rp_mid;
-      }
-    }
+    const RootBracket root = refine_monotone_root(
+        cv0, cv1, rp_cv0, rp_cv1, level, tol, 0.0,
+        [&](double cv) { return eval_getrp_submatrix(oms_ptrs[i], oms_lds[i], k, cv, gqx, gqw, n_gq, ws); });
+    cv1 = root.upper;
+    rp_cv1 = root.value_upper;
 
     double max_rp = 0.0;
     int max_i = 0;
@@ -1986,6 +2122,10 @@ SEXP cpp_lnset_wc0(SEXP s_sexp,
   const double cmax = c_out[1];
   const double neg_c0 = -c0;
 
+  std::vector<double> unit(latlong ? static_cast<size_t>(n) * 3 : 0);
+  std::vector<double> sub_unit(latlong ? static_cast<size_t>(m) * 3 : 0);
+  if (latlong) spherical_positions(S, n, unit.data());
+
   const int total_wall_cols = capN * qmax;
   std::vector<double> Wall(static_cast<size_t>(n) * total_wall_cols);
   std::vector<double> sig_d(static_cast<size_t>(m) * m);
@@ -2008,11 +2148,14 @@ SEXP cpp_lnset_wc0(SEXP s_sexp,
     demean_rect_inplace(sig_d.data(), m, m);
     compute_top_k_evecs_sym(sig_d.data(), m, qmax, W0.data());
 
+    if (latlong) spherical_positions(sub_coords, m, sub_unit.data());
+
     // Write projections directly into their strided Wall columns.
     const int wall_stride = n * capN;
     for (int row0 = 0; row0 < n; row0 += KERNEL_ROWS) {
       const int rows = std::min(KERNEL_ROWS, n - row0);
-      compute_cross_kernel(S, n, d, sub_coords, m, latlong, neg_c0, K_mat.data(), row0, rows);
+      compute_cross_kernel(S, n, d, sub_coords, m, latlong, neg_c0,
+                           unit.data(), sub_unit.data(), K_mat.data(), row0, rows);
       F77_CALL(dgemm)(&trans_n, &trans_n, &rows, &qmax, &m, &alpha,
                       K_mat.data(), &rows, W0.data(), &m, &beta,
                       Wall.data() + static_cast<size_t>(idx) * n + row0, &wall_stride FCONE FCONE);

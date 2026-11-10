@@ -1,5 +1,9 @@
 # Development changes
 
+- Reduce bandwidth and critical-value root evaluations with safeguarded Illinois interpolation; retain relative bandwidth tolerance `1e-12` and critical-value tolerance `1e-9`.
+- Cache angular quadrature nodes and evaluate bounded products without repeated logarithms. Rescale the complement near probability one to resolve narrow endpoint layers.
+- Precompute unit-sphere positions for geographic cross-kernels, with accurate nearby-point and antipodal fallbacks. Retain the 256-row memory bound.
+
 - Compute rejection probabilities using an adaptive angular integral; the zero statistic has p-value one, and the independent-error case agrees with Student-t probabilities.
 - Solve bandwidth equations to relative accuracy without a fixed upper bound in coordinate units; reject unattainable correlation targets.
 - Use great-circle distances throughout the geographic Nyström approximation and partial Fisher-Yates sampling without replacement.

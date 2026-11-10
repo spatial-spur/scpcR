@@ -36,7 +36,7 @@
 
 .getc0fromavc <- function(dist, avc0) {
   ## Solve for exponential kernel parameter c0 such that
-  ## mean(exp(-c0 * dist)) == avc0, using bisection.
+  ## mean(exp(-c0 * dist)) == avc0, using safeguarded interpolation.
   storage.mode(dist) <- "double"
   as.numeric(rcpp_getc0_from_avc(dist, as.double(avc0)))
 }
@@ -49,7 +49,7 @@
 .getrp <- function(Om, cv) {
   ## Rejection probability for the SCPC test given Omega matrix Om
   ## and normalised critical value cv (= cv/sqrt(q) in paper notation).
-  ## Uses Gauss-Legendre quadrature over the characteristic function.
+  ## Uses an adaptive angular integral for a Gaussian quadratic form.
   storage.mode(Om) <- "double"
   rcpp_getrp(Om, as.double(cv), .GQx, .GQw)
 }

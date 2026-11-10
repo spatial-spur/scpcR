@@ -70,3 +70,103 @@ test_that("correlated Gaussian rejection probabilities agree with simulation unc
     }
   }
 })
+
+
+test_that("angular probabilities match independent adaptive integration", {
+  reference <- function(Om, cv) {
+    q <- nrow(Om) - 1L
+    if (cv == 0) return(1)
+    U <- chol(Om)
+    roots <- eigen(U %*% diag(c(1, rep(-cv^2, q))) %*% t(U), symmetric = TRUE)$values
+    ratios <- -roots[roots < 0] / max(roots)
+    integrand <- function(theta) vapply(theta, function(angle) {
+      exp(-0.5 * sum(log1p(ratios / cos(angle)^2)))
+    }, 0.0)
+    # Explicit dyadic panels keep the independent Gauss-Kronrod oracle from
+    # overlooking a narrow endpoint layer when the cutoff is close to zero.
+    end <- pi/2
+    depth <- max(0L, min(40L, ceiling(log2(end / sqrt(sum(ratios))))))
+    breaks <- if (depth == 0L) c(0, end) else c(0, end - end / 2^seq_len(depth), end)
+    values <- vapply(seq_len(length(breaks) - 1L), function(i) {
+      integrate(integrand, breaks[i], breaks[i + 1L],
+        abs.tol = 1e-12 / length(breaks), rel.tol = 1e-11)$value
+    }, 0.0)
+    2 / pi * sum(values)
+  }
+  set.seed(825)
+  for (q in c(2L, 5L, 12L)) {
+    A <- matrix(rnorm((q + 1L)^2), q + 1L)
+    Om <- crossprod(A) + diag(q + 1L)
+    for (cv in c(1e-5, 0.01, 0.3, 1, 5)) {
+      expect_lt(abs(.getrp(Om, cv) - reference(Om, cv)), 2e-10)
+    }
+    if (q <= 5L) {
+      Oms <- list(diag(q + 1L), Om)
+      for (level in c(0.05, 0.01)) {
+        worst <- function(cv) max(vapply(Oms, reference, 0.0, cv = cv))
+        upper <- 1
+        while (worst(upper) > level) upper <- 2 * upper
+        root <- uniroot(function(cv) worst(cv) - level, c(0, upper), tol = 1e-11)$root
+        actual <- .getcv(Oms, q, level)
+        expect_equal(actual, sqrt(q) * root, tolerance = 1e-8)
+        expect_lte(worst(actual / sqrt(q)), level + 2e-10)
+      }
+    }
+  }
+})
+
+test_that("quadrature remains accurate for extreme tails and covariance scales", {
+  for (q in c(2L, 30L, 120L, 300L)) {
+    for (cv in c(1e-8, 0.1, 1, 10)) {
+      expect_lt(abs(.getrp(diag(q + 1L), cv) - 2 * pt(-sqrt(q) * cv, q)), 2e-10)
+    }
+  }
+  Om <- matrix(c(4, 1.2, 1.2, 2), 2L)
+  location <- Om[1, 2] / Om[2, 2]
+  scale <- sqrt(det(Om)) / Om[2, 2]
+  for (cv in c(0, 1e-5, 0.1, 1, 10, 1e6)) {
+    expected <- pcauchy(-cv, location, scale) + pcauchy(cv, location, scale, lower.tail = FALSE)
+    for (units in c(1e-100, 1, 1e100)) {
+      expect_lt(abs(.getrp(Om * units, cv) - expected), 1e-10)
+    }
+  }
+})
+
+test_that("safeguarded bandwidth interpolation respects attainable correlation targets", {
+  distances <- c(rep(0, 4), 0.01, 0.02, 0.1, 0.5, 1, 2, 10, 100)
+  floor <- mean(distances == 0)
+  targets <- floor + (1 - floor) * c(0.99, 0.03, 1e-5)
+  for (units in c(1e-12, 1, 1e12)) {
+    roots <- .getc0fromavc(distances * units, targets)
+    achieved <- vapply(roots, function(c) mean(exp(-c * distances * units)), 0.0)
+    expect_equal(achieved, targets, tolerance = 1e-11)
+    expect_true(all(diff(roots) > 0))
+  }
+})
+
+test_that("partial geographic extension agrees with a spherical distance oracle", {
+  n <- 40L; m <- 16L; q <- 3L; seed <- 7
+  set.seed(826)
+  S <- cbind(runif(n, -179, 179), runif(n, -70, 70))
+  selected <- .jumble_s(cbind(seq_len(n), seq_len(n)), m, seed)$coords[seq_len(m), 1]
+  outside <- setdiff(seq_len(n), selected)
+  S[selected[1:4], ] <- rbind(c(20, 40), c(179.999999, 45), c(10, 20), c(80, 89.99999))
+  S[outside[1:4], ] <- rbind(c(-160, -40), c(-179.999999, 45), c(10.0000001, 20.0000001), c(-100, -89.99999))
+  subsample <- S[selected, , drop = FALSE]
+  basis <- .lnset_wc0(S, 0.1, q, 1e-4, TRUE, capN = 1L, m = m, random_t = seed)
+  W0 <- .ln_subset_evecs(.getdistmat(subsample, TRUE), basis$c0, q)
+  # Spherical Vincenty formula, independent of the optimized chord calculation.
+  cross_distance <- vapply(seq_len(m), function(j) {
+    lat1 <- S[, 2] * pi/180
+    lat2 <- subsample[j, 2] * pi/180
+    dl <- (S[, 1] - subsample[j, 1]) * pi/180
+    y <- sqrt((cos(lat2) * sin(dl))^2 +
+      (cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dl))^2)
+    x <- sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(dl)
+    atan2(y, x) / (2*pi)
+  }, numeric(n))
+  expected <- exp(-basis$c0 * cross_distance) %*% W0
+  expected <- qr.Q(qr(sweep(expected, 2L, colMeans(expected), "-")))
+  actual <- basis$W[, -1, drop = FALSE]
+  expect_lt(norm(tcrossprod(expected) - tcrossprod(actual), "F"), 1e-8)
+})

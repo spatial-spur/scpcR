@@ -64,7 +64,7 @@ Default is 0.03.}
 \code{"auto"} chooses \code{"exact"} for smaller problems and
 \code{"approx"} once the large-\eqn{n} threshold is reached.
 \code{"exact"} always uses the full distance matrix.
-\code{"approx"} uses the original large-\eqn{n} approximation branch.}
+\code{"approx"} uses the Nyström/Monte Carlo large-\eqn{n} approximation branch.}
 
 \item{large_n_seed}{Numeric; integer-valued seed used by the
 large-\eqn{n} approximation branch.  Ignored when

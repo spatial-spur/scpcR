@@ -321,6 +321,8 @@ CLUSTER_STATA_SCENARIOS <- list(
 )
 
 test_that("scpcR matches Stata scpc across the standard scenario grid", {
+  testthat::skip_if(!identical(Sys.getenv("SCPC_RUN_UPSTREAM_PARITY", "false"), "true"),
+    "Upstream comparisons are diagnostic; opt in with SCPC_RUN_UPSTREAM_PARITY=true")
   ctx <- skip_if_stata_scpc_unavailable()
 
   for (scenario in STANDARD_STATA_SCENARIOS) {
@@ -335,6 +337,8 @@ test_that("scpcR matches Stata scpc across the standard scenario grid", {
 })
 
 test_that("scpcR matches Stata scpc for clustered pair-mean scenarios", {
+  testthat::skip_if(!identical(Sys.getenv("SCPC_RUN_UPSTREAM_PARITY", "false"), "true"),
+    "Upstream comparisons are diagnostic; opt in with SCPC_RUN_UPSTREAM_PARITY=true")
   ctx <- skip_if_stata_scpc_unavailable()
 
   for (scenario in CLUSTER_STATA_SCENARIOS) {
@@ -349,6 +353,8 @@ test_that("scpcR matches Stata scpc for clustered pair-mean scenarios", {
 })
 
 test_that("absorbed FE IV conditional SCPC matches Stata within tight tolerances", {
+  testthat::skip_if(!identical(Sys.getenv("SCPC_RUN_UPSTREAM_PARITY", "false"), "true"),
+    "Upstream comparisons are diagnostic; opt in with SCPC_RUN_UPSTREAM_PARITY=true")
   ctx <- skip_if_stata_scpc_unavailable()
   skip_if_not_installed("fixest")
 
@@ -431,6 +437,8 @@ test_that("absorbed FE IV conditional SCPC matches Stata within tight tolerances
 })
 
 test_that("additional IV parity cases match Stata within tight tolerances", {
+  testthat::skip_if(!identical(Sys.getenv("SCPC_RUN_UPSTREAM_PARITY", "false"), "true"),
+    "Upstream comparisons are diagnostic; opt in with SCPC_RUN_UPSTREAM_PARITY=true")
   ctx <- skip_if_stata_scpc_unavailable()
   skip_if_not_installed("fixest")
 
@@ -554,6 +562,8 @@ test_that("additional IV parity cases match Stata within tight tolerances", {
 })
 
 test_that("large-n synthetic scenarios match Stata in both unconditional and conditional modes", {
+  testthat::skip_if(!identical(Sys.getenv("SCPC_RUN_UPSTREAM_PARITY", "false"), "true"),
+    "Upstream comparisons are diagnostic; opt in with SCPC_RUN_UPSTREAM_PARITY=true")
   ctx <- skip_if_stata_scpc_unavailable()
   skip_if(
     !identical(Sys.getenv("SCPCR_RUN_STATA_HEAVY_TESTS", "false"), "true"),

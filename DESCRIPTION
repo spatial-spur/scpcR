@@ -19,7 +19,13 @@ RoxygenNote: 7.3.2
 Imports:
     fixest (>= 0.14.0),
     gaussquad,
-    sandwich
+    sandwich,
+    Rcpp (>= 1.0.0),
+    RcppParallel
+LinkingTo:
+    Rcpp,
+    RcppArmadillo,
+    RcppParallel
 Suggests:
     geodist,
     RSpectra,

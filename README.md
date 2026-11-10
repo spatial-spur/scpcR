@@ -42,6 +42,31 @@ out <- scpcR::scpc(
 summary(out)
 ```
 
+## Multithreading and Performance
+
+`scpcR` uses `RcppParallel` for multi-core acceleration in computationally intensive steps (distance matrix calculations, subsampling, and Omega grid evaluations). By default, it automatically uses available cores.
+
+You can configure or restrict multithreading using:
+
+```r
+# Restrict to a specific thread count via helper function:
+scpc_set_num_threads(2)
+
+# Or set via standard R package option:
+options(scpcR.threads = 1)
+
+# Or set via environment variable:
+Sys.setenv(SCPCR_NUM_THREADS = "1")
+
+# Check currently active thread count:
+scpc_get_num_threads()
+
+# Restore automatic multi-core threading:
+scpc_set_num_threads("auto")
+```
+
+> **Tip for cluster & batch workflows:** If you are running `scpc()` inside parallel loops (e.g. `parallel::mclapply`, `future`, or a shared cluster node), set `scpc_set_num_threads(1)` or `options(scpcR.threads = 1)` to prevent CPU oversubscription. Setting thread count to `1` completely bypasses background task submission, ensuring pure single-threaded execution without overhead or thread creation issues.
+
 ## Documentation
 
 Please refer to [the package documentation](https://spatial-spur.github.io/scpcR/) for detailed information and other (R, Python, Stata) packages.

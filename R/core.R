@@ -41,6 +41,16 @@
 #' @param cvs Logical; if \code{TRUE}, include per-coefficient critical
 #'   values at the 32\%, 10\%, 5\%, and 1\% levels.  Default is
 #'   \code{FALSE}.
+#' @param backend Character string selecting the computation backend:
+#'   \code{"auto"} (default, uses native Rust when available and eligible),
+#'   \code{"rust"} (requires the native Rust backend), or
+#'   \code{"fallback"} (pure-R implementation). When omitted, checks
+#'   \code{getOption("spatial.backend")} and \code{Sys.getenv("SPATIAL_BACKEND")}.
+#' @param nthreads Optional positive integer thread count for parallel
+#'   Rust execution, or \code{NULL} (default) to check
+#'   \code{getOption("scpcR.threads")}, \code{Sys.getenv("SCPCR_NUM_THREADS")},
+#'   and \code{getOption("mc.cores")}. Note that \code{nthreads = 1} executes
+#'   Rust on a single thread without falling back to R.
 #'
 #' @return An object of class \code{"scpc"} with components:
 #' \describe{
@@ -59,6 +69,7 @@
 #'   \item{\code{large_n_seed}}{Seed used by the large-\eqn{n}
 #'     approximation branch.}
 #'   \item{\code{call}}{The matched call.}
+#'   \item{\code{backend}}{Backend used: \code{"rust"} or \code{"fallback"}.}
 #' }
 #'
 #' @references
@@ -93,6 +104,7 @@
 #' coef(out)
 #' confint(out)
 #'
+#' @useDynLib scpcR, .registration = TRUE
 #' @export
 scpc <- function(model,
                  data,
@@ -105,7 +117,12 @@ scpc <- function(model,
                  method = "auto",
                  large_n_seed = 1,
                  uncond = FALSE,
-                 cvs = FALSE) {
+                 cvs = FALSE,
+                 backend = c("auto", "rust", "fallback"),
+                 nthreads = NULL) {
+
+  backend_resolved <- .resolve_scpc_backend(backend, backend_missing = missing(backend))
+  nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
 
   if (!is.numeric(avc) || length(avc) != 1L || is.na(avc) || !is.finite(avc)) {
     stop("`avc` must be a single finite numeric value.")
@@ -233,7 +250,74 @@ scpc <- function(model,
 
   if (ncol(coords) == 1) coords <- cbind(coords, 0)
 
-  ## 2. Spatial kernel (unconditional) ---------------------------------------
+  ## 2. Bread & coefficient subset ------------------------------------------
+  bread_inv <- sandwich::bread(model) / n
+  k_use <- if (is.null(ncoef)) p else min(ncoef, p)
+  coef_names <- raw_coef_names[seq_len(k_use)]
+
+  ## 3. Native Rust dispatch (Milestone 1: exact unclustered non-FE OLS) -----
+  m1_eligible <- !identical(method, "approx") &&
+    (identical(method, "exact") || neff < 4500L) &&
+    is.null(cluster) &&
+    is.null(cond_fixef_id) &&
+    !is_fixest_iv
+  rust_loaded <- is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")
+
+  if (identical(backend_resolved, "rust")) {
+    if (!rust_loaded) {
+      stop("`backend = \"rust\"` was requested, but the native Rust backend is not loaded in `scpcR`.")
+    }
+    if (!m1_eligible) {
+      stop(
+        "`backend = \"rust\"` currently supports exact unclustered non-FE OLS models only ",
+        "(exact method, no cluster, no absorbed fixed effects, and no IV)."
+      )
+    }
+  }
+
+  if (!identical(backend_resolved, "fallback") && m1_eligible && rust_loaded) {
+    rust_res <- .run_scpc_rust_m1(
+      coords = coords,
+      latlong = latlong,
+      avc = avc,
+      uncond = uncond,
+      cvs = cvs,
+      coef_vec = coef_vec,
+      S = S,
+      bread_inv = bread_inv,
+      model_mat_cond = model_mat_cond,
+      cond_include_intercept = cond_include_intercept,
+      k_use = k_use,
+      nthreads = nthreads_resolved
+    )
+    if (!isTRUE(rust_res$tied) || identical(backend_resolved, "rust")) {
+      out <- rust_res$scpcstats
+      rownames(out) <- coef_names
+      colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
+
+      cvs_mat <- rust_res$scpccvs
+      if (!is.null(cvs_mat)) {
+        rownames(cvs_mat) <- coef_names
+        colnames(cvs_mat) <- c("32%", "10%", "5%", "1%")
+      }
+
+      return(structure(list(
+        scpcstats = out,
+        scpccvs = cvs_mat,
+        W = rust_res$wfin,
+        avc = avc,
+        c0 = rust_res$c0,
+        cv = rust_res$cvfin,
+        q = as.numeric(rust_res$q),
+        method = "exact",
+        large_n_seed = large_n_seed,
+        call = match.call(),
+        backend = "rust"
+      ), class = "scpc"))
+    }
+  }
+
+  ## 4. Spatial kernel (pure-R fallback, unconditional) ----------------------
   spc <- .setOmsWfin(
     coords,
     avc0 = avc,
@@ -248,16 +332,11 @@ scpc <- function(model,
   q <- ncol(Wfin) - 1
   large_n_random_state <- spc$random_state
 
-  ## 3. Bread ----------------------------------------------------------------
-  bread_inv <- sandwich::bread(model) / n
-
-  ## 4. Loop over coefficients ------------------------------------------------
-  k_use <- if (is.null(ncoef)) p else min(ncoef, p)
+  ## 5. Loop over coefficients -----------------------------------------------
   out <- matrix(NA_real_, k_use, 6)
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_mat <- if (cvs) matrix(NA_real_, k_use, 4) else NULL
   cvs_uncond <- if (cvs) vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0) else NULL
-  coef_names <- raw_coef_names[seq_len(k_use)]
   rownames(out) <- coef_names
   colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
@@ -403,6 +482,178 @@ scpc <- function(model,
     q = q,
     method = spc$method,
     large_n_seed = large_n_seed,
-    call = match.call()
+    call = match.call(),
+    backend = "fallback"
   ), class = "scpc")
+}
+
+# ---------------------------------------------------------------------------
+# Backend and thread configuration helpers
+# ---------------------------------------------------------------------------
+
+.validate_scpc_backend_value <- function(val, source = "`backend`") {
+  valid <- c("auto", "rust", "fallback")
+  if (!is.character(val) || length(val) != 1L || is.na(val) || !nzchar(val) || !val %in% valid) {
+    stop(source, " must be one of \"auto\", \"rust\", or \"fallback\".", call. = FALSE)
+  }
+  val
+}
+
+.resolve_scpc_backend <- function(backend, backend_missing) {
+  if (!backend_missing && !is.null(backend) && !identical(backend, c("auto", "rust", "fallback"))) {
+    return(.validate_scpc_backend_value(backend, "`backend`"))
+  }
+
+  opt <- getOption("spatial.backend")
+  if (!is.null(opt)) {
+    return(.validate_scpc_backend_value(opt, "Option `spatial.backend`"))
+  }
+
+  env <- Sys.getenv("SPATIAL_BACKEND", unset = "")
+  if (nzchar(env)) {
+    return(.validate_scpc_backend_value(env, "Environment variable `SPATIAL_BACKEND`"))
+  }
+
+  "auto"
+}
+
+.parse_positive_int_threads <- function(val, source = "`nthreads`") {
+  if (is.character(val)) {
+    if (length(val) != 1L || is.na(val) || !nzchar(trimws(val)) || !grepl("^[0-9]+$", trimws(val))) {
+      stop(source, " must be NULL or a single positive integer.", call. = FALSE)
+    }
+    val <- suppressWarnings(as.numeric(trimws(val)))
+  }
+  if (
+    !is.numeric(val) ||
+    length(val) != 1L ||
+    is.na(val) ||
+    !is.finite(val) ||
+    val < 1 ||
+    abs(val - round(val)) > 0 ||
+    val > .Machine$integer.max
+  ) {
+    stop(source, " must be NULL or a single positive integer.", call. = FALSE)
+  }
+  as.integer(round(val))
+}
+
+.is_r_check_limit_cores <- function() {
+  val <- trimws(Sys.getenv("_R_CHECK_LIMIT_CORES_", unset = ""))
+  nzchar(val) && !tolower(val) %in% c("false", "0", "no")
+}
+
+.resolve_scpc_nthreads <- function(nthreads = NULL) {
+  resolved <- NULL
+  if (!is.null(nthreads)) {
+    resolved <- .parse_positive_int_threads(nthreads, "`nthreads`")
+  } else {
+    opt_threads <- getOption("scpcR.threads")
+    if (!is.null(opt_threads)) {
+      resolved <- .parse_positive_int_threads(opt_threads, "Option `scpcR.threads`")
+    } else {
+      env_threads <- Sys.getenv("SCPCR_NUM_THREADS", unset = "")
+      if (nzchar(trimws(env_threads))) {
+        resolved <- .parse_positive_int_threads(env_threads, "Environment variable `SCPCR_NUM_THREADS`")
+      } else {
+        opt_mc <- getOption("mc.cores")
+        if (!is.null(opt_mc)) {
+          resolved <- .parse_positive_int_threads(opt_mc, "Option `mc.cores`")
+        }
+      }
+    }
+  }
+
+  if (.is_r_check_limit_cores()) {
+    if (is.null(resolved) || resolved > 2L) {
+      resolved <- 2L
+    }
+  }
+
+  resolved
+}
+
+.build_ols_orthonormal_basis <- function(model_mat_cond, include_intercept = TRUE, tol = 1e-10) {
+  X <- .coerce_numeric_matrix(model_mat_cond, "OLS residualizer X")$mat
+  has_intercept <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
+  if (isTRUE(include_intercept) && !has_intercept) {
+    X <- cbind("(Intercept)" = 1, X)
+  }
+
+  qrX <- qr(X, tol = tol)
+  if (qrX$rank < ncol(X)) {
+    stop("OLS residualizer is rank deficient.", call. = FALSE)
+  }
+
+  sv <- svd(X, nu = ncol(X), nv = 0L)
+  if (length(sv$d) < ncol(X) || !all(is.finite(sv$d)) || sv$d[ncol(X)] <= 0) {
+    stop("OLS residualizer is rank deficient.", call. = FALSE)
+  }
+
+  Q_x <- sv$u
+  if (is.null(dim(Q_x))) {
+    Q_x <- matrix(Q_x, nrow = nrow(X), ncol = ncol(X))
+  }
+  storage.mode(Q_x) <- "double"
+  Q_x
+}
+
+.run_scpc_rust_m1 <- function(coords,
+                              latlong,
+                              avc,
+                              uncond,
+                              cvs,
+                              coef_vec,
+                              S,
+                              bread_inv,
+                              model_mat_cond,
+                              cond_include_intercept,
+                              k_use,
+                              nthreads) {
+  n <- nrow(S)
+  coords_mat <- as.matrix(coords)
+  storage.mode(coords_mat) <- "double"
+
+  coef_use <- as.double(coef_vec[seq_len(k_use)])
+  bread_sub <- bread_inv[seq_len(k_use), , drop = FALSE]
+  wj_mat <- sweep(n * (S %*% t(bread_sub)), 2L, coef_use, "+")
+  storage.mode(wj_mat) <- "double"
+
+  if (isTRUE(uncond)) {
+    xj_mat <- NULL
+    xjs_mat <- NULL
+    Q_x <- NULL
+  } else {
+    xj_mat <- n * (model_mat_cond %*% t(bread_sub))
+    storage.mode(xj_mat) <- "double"
+    xjs_mat <- sign(xj_mat)
+    storage.mode(xjs_mat) <- "double"
+    Q_x <- .build_ols_orthonormal_basis(
+      model_mat_cond,
+      include_intercept = cond_include_intercept
+    )
+  }
+
+  res <- .Call(
+    "wrap__rust_run_exact_scpc",
+    coords_mat,
+    isTRUE(latlong),
+    as.double(avc),
+    isTRUE(uncond),
+    isTRUE(cvs),
+    coef_use,
+    wj_mat,
+    xj_mat,
+    xjs_mat,
+    Q_x,
+    Q_x,
+    0.001,
+    nthreads,
+    PACKAGE = "scpcR"
+  )
+
+  if (inherits(res, "extendr_error")) {
+    stop(res$value, call. = FALSE)
+  }
+  res
 }

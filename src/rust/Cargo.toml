@@ -1,0 +1,20 @@
+[package]
+name = "scpc_rust"
+version = "0.2.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "scpc_rust"
+crate-type = ["staticlib"]
+
+[dependencies]
+extendr-api = { version = "0.7", features = ["result_condition"] }
+spatial-r = { path = "../../../spatial-rust/crates/spatial-r", default-features = false }
+spatial-core = { path = "../../../spatial-rust/crates/spatial-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

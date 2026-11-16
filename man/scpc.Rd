@@ -20,7 +20,9 @@ scpc(
   method = "auto",
   large_n_seed = 1,
   uncond = FALSE,
-  cvs = FALSE
+  cvs = FALSE,
+  backend = c("auto", "rust", "fallback"),
+  nthreads = NULL
 )
 
 \method{print}{scpc}(x, ...)
@@ -78,6 +80,18 @@ values only (skip the conditional adjustment of Mueller and Watson
 values at the 32\%, 10\%, 5\%, and 1\% levels.  Default is
 \code{FALSE}.}
 
+\item{backend}{Character string selecting the computation backend:
+\code{"auto"} (default, uses native Rust when available and eligible),
+\code{"rust"} (requires the native Rust backend), or
+\code{"fallback"} (pure-R implementation). When omitted, checks
+\code{getOption("spatial.backend")} and \code{Sys.getenv("SPATIAL_BACKEND")}.}
+
+\item{nthreads}{Optional positive integer thread count for parallel
+Rust execution, or \code{NULL} (default) to check
+\code{getOption("scpcR.threads")}, \code{Sys.getenv("SCPCR_NUM_THREADS")},
+and \code{getOption("mc.cores")}. Note that \code{nthreads = 1} executes
+Rust on a single thread without falling back to R.}
+
 \item{x}{An object of class \code{"scpc"}.}
 
 \item{\dots}{Further arguments (currently unused).}
@@ -109,6 +123,7 @@ An object of class \code{"scpc"} with components:
   \item{\code{large_n_seed}}{Seed used by the large-\eqn{n}
     approximation branch.}
   \item{\code{call}}{The matched call.}
+  \item{\code{backend}}{Backend used: \code{"rust"} or \code{"fallback"}.}
 }
 }
 \description{

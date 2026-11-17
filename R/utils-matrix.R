@@ -132,7 +132,7 @@
   }
 }
 
-.make_iv_residualizer <- function(X, Z, fixef_id = NULL, tol = 1e-10) {
+.make_iv_residualizer <- function(X, Z, fixef_id = NULL, tol = 1e-10, transpose = FALSE) {
   X <- .coerce_numeric_matrix(X, "IV residualizer X")$mat
   Z <- .coerce_numeric_matrix(Z, "IV residualizer Z")$mat
 
@@ -151,6 +151,11 @@
   if (qrA$rank < ncol(A)) {
     stop("IV residualizer is rank deficient: X'P_ZX is not full rank.")
   }
+  # H_IV = X (X' P_Z X)^-1 X' P_Z. Conditional weight columns
+  # require M_IV', whereas fitted residuals use M_IV.
+  if (isTRUE(transpose)) {
+    qrA <- qr(t(A), tol = tol)
+  }
 
   function(Y) {
     y_in <- .coerce_numeric_matrix(Y, "IV residualizer Y")
@@ -163,13 +168,14 @@
     }
 
     Y <- .demean_for_scpc(Y, fixef_id, "IV residualizer Y")
-    PzY <- .project_qr(qrZ, Y)
-    coef <- qr.coef(qrA, crossprod(X, PzY))
+    rhs <- if (isTRUE(transpose)) crossprod(X, Y) else crossprod(PzX, Y)
+    coef <- qr.coef(qrA, rhs)
     if (anyNA(coef) || any(!is.finite(coef))) {
       stop("IV residualizer produced non-finite auxiliary coefficients.")
     }
 
-    .restore_residualizer_shape(Y - X %*% coef, y_in$vec_input)
+    left <- if (isTRUE(transpose)) PzX else X
+    .restore_residualizer_shape(Y - left %*% coef, y_in$vec_input)
   }
 }
 
@@ -209,9 +215,9 @@
   Wx[, 1] <- Wfin[, 1] * xj * xjs
 
   if (ncol(Wfin) > 1L) {
-    Y <- sweep(Wfin[, -1, drop = FALSE], 1, xjs, `*`)
+    Y <- sweep(Wfin[, -1, drop = FALSE], 1, xj, `*`)
     R <- residualize(Y)
-    Wx[, -1] <- sweep(R, 1, xj, `*`)
+    Wx[, -1] <- sweep(R, 1, xjs, `*`)
   }
 
   if (!all(is.finite(Wx))) {
@@ -225,7 +231,7 @@
 # Orthogonalisation helper (conditional SCPC, clustered)
 # ---------------------------------------------------------------------------
 .orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
-                                     include_intercept = TRUE) {
+                                     include_intercept = TRUE, fixef_id = NULL) {
   ## Clustered OLS denominator weights are Xi_s' M_V Xi B_q.
   ##
   ## W:               nclust x (q+1) cluster-level spatial projection matrix
@@ -253,7 +259,8 @@
   if (ncol_W > 1L) {
     residualize <- .make_ols_residualizer(
       model_mat_indiv,
-      include_intercept = include_intercept
+      include_intercept = include_intercept,
+      fixef_id = fixef_id
     )
     Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xj_indiv, `*`)
     R <- residualize(Y)
@@ -285,9 +292,9 @@
   Wx[, 1] <- as.numeric(rowsum(W_indiv[, 1] * xjs_indiv * xj_indiv, cl_vec))
 
   if (ncol_W > 1L) {
-    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xjs_indiv, `*`)
+    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xj_indiv, `*`)
     R <- residualize(Y)
-    Wx[, -1] <- rowsum(sweep(R, 1, xj_indiv, `*`), cl_vec)
+    Wx[, -1] <- rowsum(sweep(R, 1, xjs_indiv, `*`), cl_vec)
   }
 
   if (!all(is.finite(Wx))) {

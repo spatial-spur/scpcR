@@ -101,6 +101,11 @@
   if (inherits(mm, "error")) {
     stop("Could not extract ", context, ": ", conditionMessage(mm))
   }
+  # fixest returns NULL when an IV fit has no exogenous columns after absorption
+  # (or when an intercept-free fit has only endogenous regressors).
+  if (is.null(mm) && identical(type, "iv.exo")) {
+    return(matrix(numeric(), nrow = stats::nobs(model), ncol = 0L))
+  }
   as.matrix(mm)
 }
 

@@ -53,3 +53,11 @@ Becker, Sascha O., P. David Boll and Hans-Joachim Voth "Testing and Correcting f
 Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference", Econometrica 90(6) (2022), 2901–2935. https://www.princeton.edu/~umueller/SHAR.pdf.
 
 Müller, Ulrich K. and Mark W. Watson "Spatial Correlation Robust Inference in Linear Regression and Panel Models", Journal of Business & Economic Statistics 41(4) (2023), 1050–1064. https://www.princeton.edu/~umueller/SpatialRegression.pdf.
+
+## Shared-core conditional projections
+
+Conditional OLS includes the full fitted design, including absorbed fixed effects,
+before cluster aggregation. Conditional IV uses the transpose of its oblique residual
+maker, so identical instrument and regressor spaces reduce to OLS. These corrections
+apply to both native and fallback calculations and can change intervals and p-values
+from archived releases. `backend` and `nthreads` are independent options.

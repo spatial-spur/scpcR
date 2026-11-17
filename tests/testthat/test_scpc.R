@@ -66,14 +66,16 @@ manual_fixest_iv_conditional_reference <- function(model,
       residualize <- .make_iv_residualizer(
         design$X[perm, , drop = FALSE],
         design$Z[perm, , drop = FALSE],
-        fixef_id = .permute_fixef_id(design$fixef_id, perm)
+        fixef_id = .permute_fixef_id(design$fixef_id, perm),
+        transpose = TRUE
       )
       xj <- xj_raw[perm]
     } else {
       residualize <- .make_iv_residualizer(
         design$X,
         design$Z,
-        fixef_id = design$fixef_id
+        fixef_id = design$fixef_id,
+        transpose = TRUE
       )
       xj <- xj_raw
     }

@@ -199,7 +199,8 @@ scpc <- function(model,
     iv_residualizer <- .make_iv_residualizer(
       iv_cond_design$X,
       iv_cond_design$Z,
-      fixef_id = cond_fixef_id
+      fixef_id = cond_fixef_id,
+      transpose = TRUE
     )
     if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
       stop(
@@ -230,9 +231,6 @@ scpc <- function(model,
   if (!is.null(cluster)) {
     if (!cluster %in% names(data)) {
       stop("Cluster variable not found in data: ", cluster)
-    }
-    if (!is_fixest_iv && !is.null(cond_fixef_id) && !isTRUE(uncond)) {
-      stop("Conditional SCPC with absorbed fixed effects and external clustering is not yet implemented; use `uncond = TRUE`.")
     }
     cl_vec <- factor(data[[cluster]][obs_index])
 
@@ -452,7 +450,8 @@ scpc <- function(model,
           ## Clustered conditional: individual-level orthogonalization
           Wx <- .orthogonalize_W_cluster(
             Wfin, cl_vec_scpc, xj_indiv, model_mat_cond,
-            include_intercept = cond_include_intercept
+            include_intercept = cond_include_intercept,
+            fixef_id = cond_fixef_id
           )
         }
       } else if (is_fixest_iv) {
@@ -461,7 +460,8 @@ scpc <- function(model,
           residualize <- .make_iv_residualizer(
             iv_cond_design$X[perm, , drop = FALSE],
             iv_cond_design$Z[perm, , drop = FALSE],
-            fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm)
+            fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm),
+            transpose = TRUE
           )
           xj <- xj_raw[perm]
         } else {
@@ -771,10 +771,11 @@ scpc <- function(model,
         iv_cond_design$Z,
         fixef_id = cond_fixef_id
       )
-      proj_u <- iv_proj$U
-      proj_v <- iv_proj$V
-      rust_xj <- xjs_mat
-      rust_xjs <- xj_mat
+      # Denominator columns are Xi_s' M_IV' Xi R, with M_IV = I - U V'.
+      proj_u <- iv_proj$V
+      proj_v <- iv_proj$U
+      rust_xj <- xj_mat
+      rust_xjs <- xjs_mat
     } else {
       Q_x <- .build_ols_orthonormal_basis(
         model_mat_cond,

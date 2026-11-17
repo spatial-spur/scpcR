@@ -6,14 +6,17 @@ pub mod basis;
 pub mod calibration;
 mod covariance;
 pub mod distance;
-mod linalg;
+pub mod linalg;
+pub mod nystrom;
 mod quadrature;
 pub mod scpc_op;
 mod student_t;
 pub mod threads;
 
 pub use distance::Metric;
-pub use scpc_op::{run_exact_scpc, ExactScpcOutput, ExactScpcRequest};
+pub use scpc_op::{
+    run_approx_scpc, run_exact_scpc, ApproxScpcRequest, ExactScpcOutput, ExactScpcRequest,
+};
 
 use std::fmt;
 

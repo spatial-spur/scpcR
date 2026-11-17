@@ -157,10 +157,14 @@ test_that("conditional OLS cutoffs match the fitted design with and without an i
   d <- d[rep(seq_len(nrow(d)), each = 2), ]
   d$x <- d$x + c(-.25, .25)
   d$y <- d$x + (d$s == 0)
-  with_intercept <- scpc(lm(y ~ x, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = "fallback")
-  without_intercept <- scpc(lm(y ~ x - 1, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = "fallback")
-  expect_lt(abs(with_intercept$scpccvs["x", "5%"] - 17.380977), .002)
-  expect_lt(abs(without_intercept$scpccvs["x", "5%"] - 9.902023), .002)
+  for (backend in backends) {
+    with_intercept <- scpc(lm(y ~ x, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = backend)
+    without_intercept <- scpc(lm(y ~ x - 1, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = backend)
+    expect_identical(with_intercept$backend, backend)
+    expect_identical(without_intercept$backend, backend)
+    expect_lt(abs(with_intercept$scpccvs["x", "5%"] - 17.380977), .002)
+    expect_lt(abs(without_intercept$scpccvs["x", "5%"] - 9.902023), .002)
+  }
 })
 
 assert_relative_close <- function(actual, expected, rel_tol) {
@@ -436,30 +440,51 @@ test_that("unsupported M1 cases fall back in auto and error in explicit rust mod
     cluster = "cluster",
     avc = 0.1, uncond = TRUE, backend = "auto"
   )
-  expect_identical(out_cl_auto$backend, "fallback")
-
-  expect_error(
-    scpc(
+  out_cl_fb <- scpc(
+    fit, dat,
+    coords_euclidean = c("lon", "lat"),
+    cluster = "cluster",
+    avc = 0.1, uncond = TRUE, backend = "fallback"
+  )
+  if (is.loaded("wrap__rust_run_exact_scpc_clustered", PACKAGE = "scpcR")) {
+    out_cl_rust <- scpc(
       fit, dat,
       coords_euclidean = c("lon", "lat"),
       cluster = "cluster",
       avc = 0.1, uncond = TRUE, backend = "rust"
     )
-  )
+    expect_identical(out_cl_rust$backend, "rust")
+    expect_identical(out_cl_auto$backend, "rust")
+    expect_equal(out_cl_rust$scpcstats, out_cl_fb$scpcstats, tolerance = 1e-10)
+  } else {
+    expect_identical(out_cl_auto$backend, "fallback")
+  }
 
+  dat_approx <- make_scpc_data(n = 20)
+  fit_approx <- stats::lm(y ~ x, data = dat_approx)
   out_approx_auto <- scpc(
-    fit, dat,
+    fit_approx, dat_approx,
     coords_euclidean = c("lon", "lat"),
     avc = 0.1, method = "approx", uncond = TRUE, backend = "auto"
   )
-  expect_identical(out_approx_auto$backend, "fallback")
-  expect_error(
-    scpc(
-      fit, dat,
+  out_approx_fb <- scpc(
+    fit_approx, dat_approx,
+    coords_euclidean = c("lon", "lat"),
+    avc = 0.1, method = "approx", uncond = TRUE, backend = "fallback"
+  )
+  if (is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR")) {
+    out_approx_rust <- scpc(
+      fit_approx, dat_approx,
       coords_euclidean = c("lon", "lat"),
       avc = 0.1, method = "approx", uncond = TRUE, backend = "rust"
     )
-  )
+    expect_identical(out_approx_rust$backend, "rust")
+    expect_identical(out_approx_auto$backend, "rust")
+    expect_identical(out_approx_rust$method, "approx")
+    expect_equal(out_approx_rust$scpcstats, out_approx_fb$scpcstats, tolerance = 1e-10)
+  } else {
+    expect_identical(out_approx_auto$backend, "fallback")
+  }
 
   if (!is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
     expect_error(
@@ -797,21 +822,51 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
 
   if (requireNamespace("fixest", quietly = TRUE)) {
     with_fixest_single_thread({
+      dat$fe2 <- rep(seq_len(5L), times = 5L)
       fit_fe <- fixest::feols(y ~ x | fe, data = dat)
+      fit_fe2 <- fixest::feols(y ~ x | fe + fe2, data = dat)
+      has_rust_full <- is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR")
+
       for (uncond_flag in c(TRUE, FALSE)) {
         out_fe_auto <- scpc(
           fit_fe, dat,
           coords_euclidean = c("lon", "lat"),
           avc = 0.1, uncond = uncond_flag, backend = "auto"
         )
-        expect_identical(out_fe_auto$backend, "fallback")
-        expect_error(
-          scpc(
-            fit_fe, dat,
-            coords_euclidean = c("lon", "lat"),
-            avc = 0.1, uncond = uncond_flag, backend = "rust"
-          )
+        out_fe_fb <- scpc(
+          fit_fe, dat,
+          coords_euclidean = c("lon", "lat"),
+          avc = 0.1, uncond = uncond_flag, backend = "fallback"
         )
+        if (has_rust_full || (uncond_flag && is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"))) {
+          expect_identical(out_fe_auto$backend, "rust")
+          expect_equal(out_fe_auto$scpcstats, out_fe_fb$scpcstats, tolerance = 1e-10)
+        } else {
+          expect_identical(out_fe_auto$backend, "fallback")
+        }
+      }
+
+      # 2-way absorbed FE falls back cleanly when conditional, runs on Rust when uncond = TRUE
+      out_2way_auto <- scpc(
+        fit_fe2, dat,
+        coords_euclidean = c("lon", "lat"),
+        avc = 0.1, uncond = FALSE, backend = "auto"
+      )
+      expect_identical(out_2way_auto$backend, "fallback")
+      expect_error(
+        scpc(
+          fit_fe2, dat,
+          coords_euclidean = c("lon", "lat"),
+          avc = 0.1, uncond = FALSE, backend = "rust"
+        )
+      )
+      if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+        out_2way_uncond <- scpc(
+          fit_fe2, dat,
+          coords_euclidean = c("lon", "lat"),
+          avc = 0.1, uncond = TRUE, backend = "rust"
+        )
+        expect_identical(out_2way_uncond$backend, "rust")
       }
 
       if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
@@ -850,11 +905,244 @@ test_that("forced fallback and ineligible auto calls ignore invalid ambient thre
   out_fb <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "fallback")
   expect_identical(out_fb$backend, "fallback")
 
-  out_cl <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), cluster = "cluster", avc = 0.1, uncond = TRUE, backend = "auto")
-  expect_identical(out_cl$backend, "fallback")
-
   expect_error(
     scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "fallback", nthreads = 0),
     "positive integer"
   )
+})
+
+test_that("clustered exact OLS matches fallback across bench_200 and factor/string clusters", {
+  skip_if_not(is.loaded("wrap__rust_run_exact_scpc_clustered", PACKAGE = "scpcR"), "native Rust library not loaded")
+  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
+  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+
+  d200 <- utils::read.csv(bench_200_path)
+  d200$cl_str <- paste0("cl_", sprintf("%03d", d200$cluster_id))
+  fit_lm <- stats::lm(y ~ x1 + x2, data = d200)
+  fit_fe <- fixest::feols(y ~ x1 + x2, data = d200)
+
+  for (uncond_flag in c(FALSE, TRUE)) {
+    for (ll in c(FALSE, TRUE)) {
+      coord_args <- if (ll) {
+        list(lon = "s_1_clustered", lat = "s_2_clustered")
+      } else {
+        list(coords_euclidean = c("s_1_clustered", "s_2_clustered"))
+      }
+      for (fit in list(fit_lm, fit_fe)) {
+        out_r <- do.call(scpc, c(list(model = fit, data = d200, cluster = "cl_str", avc = 0.03, uncond = uncond_flag, cvs = TRUE, backend = "rust"), coord_args))
+        out_f <- do.call(scpc, c(list(model = fit, data = d200, cluster = "cl_str", avc = 0.03, uncond = uncond_flag, cvs = TRUE, backend = "fallback"), coord_args))
+        expect_identical(out_r$backend, "rust")
+        expect_identical(out_f$backend, "fallback")
+        expect_equal(out_r$q, out_f$q)
+        expect_equal(out_r$c0, out_f$c0, tolerance = 1e-10)
+        expect_equal(out_r$cv, out_f$cv, tolerance = 1e-10)
+        expect_equal(out_r$scpcstats, out_f$scpcstats, tolerance = 1e-10)
+        expect_equal(out_r$scpccvs, out_f$scpccvs, tolerance = 1e-10)
+      }
+    }
+  }
+})
+
+test_that("IV and 1-way absorbed FE Rust paths match fallback across unclustered and clustered fits", {
+  skip_if_not_installed("fixest")
+  skip_if_not(is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR"), "native Rust library not loaded")
+
+  with_fixest_single_thread({
+    set.seed(2027)
+    n_cl <- 30L
+    cl_sz <- 4L
+    n <- n_cl * cl_sz
+    cl <- rep(seq_len(n_cl), each = cl_sz)
+    fe <- ((seq_len(n) - 1L) %% 6L) + 1L
+    lon_cl <- stats::runif(n_cl)
+    lat_cl <- stats::runif(n_cl)
+    z <- stats::rnorm(n)
+    w <- stats::rnorm(n)
+    u <- stats::rnorm(n)
+    x <- 0.85 * z + 0.3 * w + 0.5 * u + 0.2 * (fe - 3.5)
+    y <- 1.0 + 1.2 * x + 0.45 * w + 0.7 * stats::rnorm(6L)[fe] + u
+    d <- data.frame(
+      y = y, x = x, w = w, z = z, fe = fe, cl = cl,
+      lon = lon_cl[cl] + 0.01 * stats::rnorm(n),
+      lat = lat_cl[cl] + 0.01 * stats::rnorm(n),
+      cl_lon = lon_cl[cl],
+      cl_lat = lat_cl[cl]
+    )
+
+    # 1. 1-way FE OLS (also verify agreement with explicit factor dummy OLS)
+    fit_fe_ols <- fixest::feols(y ~ x + w | fe, data = d)
+    out_fe_r <- scpc(fit_fe_ols, d, coords_euclidean = c("lon", "lat"), avc = 0.1, cvs = TRUE, backend = "rust")
+    out_fe_f <- scpc(fit_fe_ols, d, coords_euclidean = c("lon", "lat"), avc = 0.1, cvs = TRUE, backend = "fallback")
+    expect_identical(out_fe_r$backend, "rust")
+    expect_equal(out_fe_r$q, out_fe_f$q)
+    expect_equal(out_fe_r$scpcstats, out_fe_f$scpcstats, tolerance = 1e-10)
+    expect_equal(out_fe_r$scpccvs, out_fe_f$scpccvs, tolerance = 1e-10)
+
+    # 2. Unclustered and clustered IV (with and without 1-way FE)
+    cases <- list(
+      list(fit = fixest::feols(y ~ w | x ~ z, data = d), cluster = NULL, coords = c("lon", "lat")),
+      list(fit = fixest::feols(y ~ w | fe | x ~ z, data = d), cluster = NULL, coords = c("lon", "lat")),
+      list(fit = fixest::feols(y ~ w | x ~ z, data = d), cluster = "cl", coords = c("cl_lon", "cl_lat")),
+      list(fit = fixest::feols(y ~ w | fe | x ~ z, data = d), cluster = "cl", coords = c("cl_lon", "cl_lat"))
+    )
+    for (cs in cases) {
+      for (uncond_flag in c(FALSE, TRUE)) {
+        out_r <- scpc(
+          cs$fit, d,
+          coords_euclidean = cs$coords,
+          cluster = cs$cluster,
+          avc = 0.1, uncond = uncond_flag, cvs = TRUE, backend = "rust"
+        )
+        out_f <- scpc(
+          cs$fit, d,
+          coords_euclidean = cs$coords,
+          cluster = cs$cluster,
+          avc = 0.1, uncond = uncond_flag, cvs = TRUE, backend = "fallback"
+        )
+        expect_identical(out_r$backend, "rust")
+        expect_equal(out_r$q, out_f$q)
+        expect_equal(out_r$c0, out_f$c0, tolerance = 1e-10)
+        expect_equal(out_r$cv, out_f$cv, tolerance = 1e-10)
+        expect_equal(out_r$scpcstats, out_f$scpcstats, tolerance = 1e-10)
+        expect_equal(out_r$scpccvs, out_f$scpccvs, tolerance = 1e-10)
+      }
+    }
+  })
+})
+
+test_that("Nystrom approx SCPC matches fallback on bench_200 OLS and IV/FE/clustered fits", {
+  skip_if_not(is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
+  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
+  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+
+  d200 <- utils::read.csv(bench_200_path)
+  fit_lm <- stats::lm(y ~ x1 + x2, data = d200)
+  for (uncond_flag in c(FALSE, TRUE)) {
+    for (ll in c(FALSE, TRUE)) {
+      coord_args <- if (ll) {
+        list(lon = "s_1", lat = "s_2")
+      } else {
+        list(coords_euclidean = c("s_1", "s_2"))
+      }
+      out_r1 <- do.call(scpc, c(list(
+        model = fit_lm, data = d200, avc = 0.05,
+        method = "approx", large_n_seed = 7, uncond = uncond_flag, cvs = TRUE,
+        backend = "rust", nthreads = 1L
+      ), coord_args))
+      out_r2 <- do.call(scpc, c(list(
+        model = fit_lm, data = d200, avc = 0.05,
+        method = "approx", large_n_seed = 7, uncond = uncond_flag, cvs = TRUE,
+        backend = "rust", nthreads = 2L
+      ), coord_args))
+      out_f <- do.call(scpc, c(list(
+        model = fit_lm, data = d200, avc = 0.05,
+        method = "approx", large_n_seed = 7, uncond = uncond_flag, cvs = TRUE,
+        backend = "fallback"
+      ), coord_args))
+      expect_identical(out_r1$backend, "rust")
+      expect_identical(out_r1$method, "approx")
+      expect_equal(out_r1$q, out_f$q)
+      expect_equal(out_r1$c0, out_f$c0, tolerance = 1e-10)
+      expect_equal(out_r1$cv, out_f$cv, tolerance = 1e-10)
+      expect_equal(out_r1$scpcstats, out_f$scpcstats, tolerance = 1e-10)
+      expect_equal(out_r1$scpccvs, out_f$scpccvs, tolerance = 1e-10)
+      expect_equal(out_r1$scpcstats, out_r2$scpcstats, tolerance = 1e-13)
+      expect_equal(out_r1$scpccvs, out_r2$scpccvs, tolerance = 1e-13)
+    }
+  }
+
+  skip_if_not_installed("fixest")
+  with_fixest_single_thread({
+    set.seed(2028)
+    n_cl <- 25L
+    cl_sz <- 4L
+    n <- n_cl * cl_sz
+    cl <- paste0("g_", rep(seq_len(n_cl), each = cl_sz))
+    cl_num <- rep(seq_len(n_cl), each = cl_sz)
+    fe <- ((seq_len(n) - 1L) %% 5L) + 1L
+    lon_cl <- stats::runif(n_cl)
+    lat_cl <- stats::runif(n_cl)
+    z <- stats::rnorm(n)
+    w <- stats::rnorm(n)
+    u <- stats::rnorm(n)
+    x <- 0.85 * z + 0.3 * w + 0.5 * u + 0.2 * (fe - 3.0)
+    y <- 1.0 + 1.2 * x + 0.45 * w + 0.7 * stats::rnorm(5L)[fe] + u
+    d <- data.frame(
+      y = y, x = x, w = w, z = z, fe = fe, cl = cl,
+      lon = lon_cl[cl_num] + 0.01 * stats::rnorm(n),
+      lat = lat_cl[cl_num] + 0.01 * stats::rnorm(n),
+      cl_lon = lon_cl[cl_num],
+      cl_lat = lat_cl[cl_num]
+    )
+    cases <- list(
+      list(fit = fixest::feols(y ~ w | x ~ z, data = d), cluster = NULL, coords = c("lon", "lat")),
+      list(fit = fixest::feols(y ~ w | fe | x ~ z, data = d), cluster = NULL, coords = c("lon", "lat")),
+      list(fit = fixest::feols(y ~ w | x ~ z, data = d), cluster = "cl", coords = c("cl_lon", "cl_lat")),
+      list(fit = fixest::feols(y ~ w | fe | x ~ z, data = d), cluster = "cl", coords = c("cl_lon", "cl_lat"))
+    )
+    for (cs in cases) {
+      for (uncond_flag in c(FALSE, TRUE)) {
+        out_r <- scpc(
+          cs$fit, d,
+          coords_euclidean = cs$coords,
+          cluster = cs$cluster,
+          avc = 0.1, method = "approx", large_n_seed = 3,
+          uncond = uncond_flag, cvs = TRUE, backend = "rust"
+        )
+        out_f <- scpc(
+          cs$fit, d,
+          coords_euclidean = cs$coords,
+          cluster = cs$cluster,
+          avc = 0.1, method = "approx", large_n_seed = 3,
+          uncond = uncond_flag, cvs = TRUE, backend = "fallback"
+        )
+        expect_identical(out_r$backend, "rust")
+        expect_identical(out_r$method, "approx")
+        expect_equal(out_r$q, out_f$q)
+        expect_equal(out_r$c0, out_f$c0, tolerance = 1e-10)
+        expect_equal(out_r$cv, out_f$cv, tolerance = 1e-10)
+        expect_equal(out_r$scpcstats, out_f$scpcstats, tolerance = 1e-10)
+        expect_equal(out_r$scpccvs, out_f$scpccvs, tolerance = 1e-10)
+      }
+    }
+  })
+})
+
+test_that("method overrides 4500 threshold and approx tied eigenspace falls back in auto", {
+  skip_if_not(is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
+  set.seed(2026)
+  n_big <- 4500L
+  d_big <- data.frame(
+    s1 = stats::runif(n_big),
+    s2 = stats::runif(n_big),
+    x = stats::rnorm(n_big)
+  )
+  d_big$y <- 0.5 + 1.2 * d_big$x + stats::rnorm(n_big, sd = 0.5)
+  fit_big <- stats::lm(y ~ x, data = d_big)
+
+  out_auto <- scpc(fit_big, d_big, coords_euclidean = c("s1", "s2"), method = "auto", backend = "rust")
+  expect_identical(out_auto$backend, "rust")
+  expect_identical(out_auto$method, "approx")
+
+  out_exact <- scpc(fit_big, d_big, coords_euclidean = c("s1", "s2"), method = "exact", backend = "rust")
+  expect_identical(out_exact$backend, "rust")
+  expect_identical(out_exact$method, "exact")
+
+  n_tie <- 20L
+  ang <- 2 * pi * (seq_len(n_tie) - 1L) / n_tie
+  d_tie <- data.frame(
+    s1 = cos(ang),
+    s2 = sin(ang),
+    x = stats::rnorm(n_tie)
+  )
+  d_tie$y <- 1 + d_tie$x + stats::rnorm(n_tie)
+  fit_tie <- stats::lm(y ~ x, data = d_tie)
+
+  expect_error(
+    scpc(fit_tie, d_tie, coords_euclidean = c("s1", "s2"), avc = 0.5, method = "approx", backend = "rust"),
+    "tied eigenspace"
+  )
+  out_tie_auto <- scpc(fit_tie, d_tie, coords_euclidean = c("s1", "s2"), avc = 0.5, method = "approx", backend = "auto")
+  expect_identical(out_tie_auto$backend, "fallback")
+  expect_identical(out_tie_auto$method, "approx")
 })

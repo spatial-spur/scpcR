@@ -10,7 +10,8 @@ pub fn avg_correlation(c: f64, distances: &[f64]) -> f64 {
     if distances.is_empty() {
         return f64::NAN;
     }
-    let sum = if !crate::threads::is_serial() && distances.len() >= 4 * CHUNK_SIZE {
+    // Chunk identically across serial and parallel paths so sum order is thread-count invariant.
+    let chunk_sums: Vec<f64> = if !crate::threads::is_serial() && distances.len() >= 4 * CHUNK_SIZE {
         distances
             .par_chunks(CHUNK_SIZE)
             .map_init(Vec::new, |scratch, chunk| {
@@ -18,13 +19,19 @@ pub fn avg_correlation(c: f64, distances: &[f64]) -> f64 {
                 linalg::exp_scaled(chunk, -c, scratch);
                 scratch.iter().sum::<f64>()
             })
-            .sum::<f64>()
+            .collect()
     } else {
-        let mut scratch = vec![0.0; distances.len()];
-        linalg::exp_scaled(distances, -c, &mut scratch);
-        scratch.iter().sum::<f64>()
+        let mut scratch = Vec::with_capacity(distances.len().min(CHUNK_SIZE));
+        distances
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| {
+                scratch.resize(chunk.len(), 0.0);
+                linalg::exp_scaled(chunk, -c, &mut scratch);
+                scratch.iter().sum::<f64>()
+            })
+            .collect()
     };
-    sum / distances.len() as f64
+    chunk_sums.into_iter().sum::<f64>() / distances.len() as f64
 }
 
 /// Fraction of zero-distance pairs in `distances` (co-location correlation floor).
@@ -84,18 +91,24 @@ fn eval_residual_and_slope(
     near_one: bool,
 ) -> (f64, f64) {
     let n = distances.len() as f64;
-    let (mass_or_delta, pos_slope) =
+    let chunk_pairs: Vec<(f64, f64)> =
         if !crate::threads::is_serial() && distances.len() >= 4 * CHUNK_SIZE {
             distances
                 .par_chunks(CHUNK_SIZE)
                 .map_init(Vec::new, |scratch, chunk| {
                     eval_residual_and_slope_chunk(chunk, c, near_one, scratch)
                 })
-                .reduce(|| (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+                .collect()
         } else {
-            let mut scratch = Vec::with_capacity(distances.len());
-            eval_residual_and_slope_chunk(distances, c, near_one, &mut scratch)
+            let mut scratch = Vec::with_capacity(distances.len().min(CHUNK_SIZE));
+            distances
+                .chunks(CHUNK_SIZE)
+                .map(|chunk| eval_residual_and_slope_chunk(chunk, c, near_one, &mut scratch))
+                .collect()
         };
+    let (mass_or_delta, pos_slope) = chunk_pairs
+        .into_iter()
+        .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
     let residual = if near_one {
         (1.0 - target_avc) + mass_or_delta / n
     } else {

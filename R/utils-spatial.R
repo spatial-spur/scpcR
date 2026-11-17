@@ -399,10 +399,12 @@
   for (i in seq_len(m)) {
     nxt <- .next_u(random_t)
     random_t <- nxt$state
-    j <- floor(nxt$value * n) + 1L
-    tmp <- S[j, ]
-    S[j, ] <- S[i, ]
-    S[i, ] <- tmp
+    j <- i + floor(nxt$value * (n - i + 1L))
+    if (j != i) {
+      tmp <- S[j, ]
+      S[j, ] <- S[i, ]
+      S[i, ] <- tmp
+    }
   }
   list(coords = S, state = random_t)
 }
@@ -448,8 +450,12 @@
     W0 <- .ln_subset_evecs(ms[[i]]$distmat, c0, qmax)
     Wx <- matrix(0, n, qmax)
     for (j in seq_len(m)) {
-      diff <- sweep(S, 2, ms[[i]]$coords[j, ], `-`)
-      v <- exp(-c0 * sqrt(rowSums(diff^2)))
+      d_cross <- .getdistvec(
+        S,
+        matrix(ms[[i]]$coords[j, ], nrow = n, ncol = ncol(S), byrow = TRUE),
+        latlong
+      )
+      v <- exp(-c0 * d_cross)
       Wx <- Wx + tcrossprod(v, W0[j, ])
     }
     Wx <- sweep(Wx, 2, colMeans(Wx), `-`)
@@ -510,10 +516,11 @@
   W1 <- W[inds[seq_len(capM)], , drop = FALSE]
   W2 <- W[inds[2:(capM + 1L)], , drop = FALSE]
 
+  gram <- crossprod(W)
   c <- c0
   for (i in seq_len(nc)) {
     cd <- exp(-c * dist)
-    Oms[[i]] <- diag(ncol(W)) +
+    Oms[[i]] <- gram +
       0.5 * (n * (n - 1) / capM) *
       (crossprod(W1, W2 * cd) + crossprod(W2, W1 * cd))
     c <- c * cgridfac
@@ -601,8 +608,9 @@
     perm <- norm_s$perm
   }
 
+  q_limit <- if (identical(method_actual, "approx")) min(large_n_m, n) - 1L else n - 1L
   repeat {
-    qmax <- min(qmax, n - 1)
+    qmax <- min(qmax, q_limit)
     if (identical(method_actual, "exact")) {
       W <- .getW(distmat, c0, qmax)
       tied <- isTRUE(attr(W, "tied"))
@@ -626,7 +634,7 @@
       tied <- FALSE
     }
     fin <- .setfinalW(Oms, W, qmax)
-    if (fin$q < qmax || qmax == n - 1) break
+    if (fin$q < qmax || qmax >= q_limit) break
     qmax <- round(qmax + qmax / 2)
   }
 

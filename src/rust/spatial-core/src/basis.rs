@@ -101,6 +101,19 @@ pub struct SymmetricEigen {
     pub tied: bool,
 }
 
+pub(crate) fn symmetric_eigenpairs(
+    matrix: &[f64],
+    n: usize,
+    q: usize,
+) -> Result<SymmetricEigen, CoreError> {
+    if n == 0 || q == 0 || q > n || matrix.len() != checked_len(&[n, n])? {
+        return Err(CoreError::invalid_input(
+            "symmetric eigenproblem dimensions do not match",
+        ));
+    }
+    leading_eigenpairs(Cow::Borrowed(matrix), n, q)
+}
+
 fn leading_eigenpairs(
     mut covariance: Cow<'_, [f64]>,
     n: usize,

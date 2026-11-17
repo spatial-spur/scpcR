@@ -226,6 +226,7 @@ scpc <- function(model,
   coords <- coord_info$coords
   latlong <- coord_info$latlong
 
+  cl_vec <- NULL
   if (!is.null(cluster)) {
     if (!cluster %in% names(data)) {
       stop("Cluster variable not found in data: ", cluster)
@@ -259,47 +260,95 @@ scpc <- function(model,
   k_use <- if (is.null(ncoef)) p else min(ncoef, p)
   coef_names <- raw_coef_names[seq_len(k_use)]
 
-  ## 3. Native Rust dispatch (Milestone 1: exact unclustered non-FE OLS) -----
+  ## 3. Native Rust dispatch (exact unweighted OLS, IV, and 1-way FE)
   is_unweighted <- is.null(stats::weights(model)) && is.null(model$weights)
-  m1_eligible <- !identical(method, "approx") &&
-    (identical(method, "exact") || neff < 4500L) &&
-    is.null(cluster) &&
-    is.null(cond_fixef_id) &&
+  fe_is_multiway <- !isTRUE(uncond) &&
+    !is.null(cond_fixef_id) &&
+    (length(model$fixef_vars) != 1L || !is.null(model$fixef_terms))
+  fe_id_0 <- NULL
+  if (!isTRUE(uncond) && !is.null(cond_fixef_id) && !fe_is_multiway) {
+    fe_raw <- if (is.list(cond_fixef_id)) {
+      cond_fixef_id[[1L]]
+    } else if (!is.null(dim(cond_fixef_id))) {
+      cond_fixef_id[, 1L]
+    } else {
+      cond_fixef_id
+    }
+    fe_id_0 <- as.integer(factor(fe_raw)) - 1L
+    storage.mode(fe_id_0) <- "integer"
+  }
+
+  method_actual <- if (identical(method, "approx") || (identical(method, "auto") && neff >= 4500L)) {
+    "approx"
+  } else {
+    "exact"
+  }
+  rust_eligible <- (method_actual %in% c("exact", "approx")) &&
+    !fe_is_multiway &&
     !inherits(model, "glm") &&
-    (inherits(model, "lm") ||
-      (inherits(model, "fixest") && !.has_fixest_fe(model) && !is_fixest_iv)) &&
-    is_unweighted
-  rust_loaded <- is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")
+    (inherits(model, "lm") || inherits(model, "fixest")) &&
+    is_unweighted &&
+    k_use >= 1L
+  rust_sym <- if (identical(method_actual, "approx")) {
+    "wrap__rust_run_approx_scpc"
+  } else if (!isTRUE(uncond) && (!is.null(fe_id_0) || isTRUE(is_fixest_iv))) {
+    "wrap__rust_run_exact_scpc_full"
+  } else if (is.null(cluster)) {
+    "wrap__rust_run_exact_scpc"
+  } else {
+    "wrap__rust_run_exact_scpc_clustered"
+  }
+  rust_loaded <- is.loaded(rust_sym, PACKAGE = "scpcR")
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
       stop("`backend = \"rust\"` was requested, but the native Rust backend is not loaded in `scpcR`.")
     }
-    if (!m1_eligible) {
+    if (!rust_eligible) {
       stop(
-        "`backend = \"rust\"` currently supports exact unweighted, unclustered, non-FE OLS models only ",
-        "(exact method, no weights, no cluster, no absorbed fixed effects, and no IV)."
+        "`backend = \"rust\"` currently supports unweighted OLS, IV, and 1-way FE models only ",
+        "(no weights, no multi-way absorbed fixed effects)."
       )
     }
   }
 
-  if (!identical(backend_resolved, "fallback") && m1_eligible && rust_loaded) {
+  if (!identical(backend_resolved, "fallback") && rust_eligible && rust_loaded) {
     nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
-    rust_res <- .run_scpc_rust_m1(
-      coords = coords,
-      latlong = latlong,
-      avc = avc,
-      uncond = uncond,
-      cvs = cvs,
-      coef_vec = coef_vec,
-      S = S,
-      bread_inv = bread_inv,
-      model_mat_cond = model_mat_cond,
-      cond_include_intercept = cond_include_intercept,
-      k_use = k_use,
-      nthreads = nthreads_resolved
+    rust_tied_fallback <- FALSE
+    rust_res <- tryCatch(
+      .run_scpc_rust_m1(
+        coords = coords,
+        latlong = latlong,
+        avc = avc,
+        uncond = uncond,
+        cvs = cvs,
+        coef_vec = coef_vec,
+        S = S,
+        bread_inv = bread_inv,
+        model_mat_cond = model_mat_cond,
+        cond_include_intercept = cond_include_intercept,
+        k_use = k_use,
+        nthreads = nthreads_resolved,
+        cl_vec = cl_vec,
+        fe_id_0 = fe_id_0,
+        is_fixest_iv = is_fixest_iv,
+        iv_cond_design = iv_cond_design,
+        cond_fixef_id = cond_fixef_id,
+        method_actual = method_actual,
+        large_n_seed = large_n_seed
+      ),
+      error = function(e) {
+        if (identical(method_actual, "approx") &&
+            identical(backend_resolved, "auto") &&
+            grepl("tied eigenspace", conditionMessage(e), fixed = TRUE)) {
+          rust_tied_fallback <<- TRUE
+          return(NULL)
+        }
+        stop(e)
+      }
     )
-    if (!isTRUE(rust_res$tied) || identical(backend_resolved, "rust")) {
+    if (!isTRUE(rust_tied_fallback) && !is.null(rust_res) &&
+        (!isTRUE(rust_res$tied) || identical(backend_resolved, "rust"))) {
       out <- rust_res$scpcstats
       rownames(out) <- coef_names
       colnames(out) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
@@ -318,7 +367,7 @@ scpc <- function(model,
         c0 = rust_res$c0,
         cv = rust_res$cvfin,
         q = as.numeric(rust_res$q),
-        method = "exact",
+        method = method_actual,
         large_n_seed = large_n_seed,
         call = match.call(),
         backend = "rust",
@@ -634,6 +683,33 @@ scpc <- function(model,
   Q_x
 }
 
+.build_iv_projector <- function(X_iv, Z_iv, fixef_id = NULL, tol = 1e-10) {
+  X <- .coerce_numeric_matrix(X_iv, "IV residualizer X")$mat
+  Z <- .coerce_numeric_matrix(Z_iv, "IV residualizer Z")$mat
+  if (nrow(X) != nrow(Z)) {
+    stop("IV residualizer requires X and Z to have the same number of rows.", call. = FALSE)
+  }
+  X <- .demean_for_scpc(X, fixef_id, "IV residualizer X")
+  Z <- .demean_for_scpc(Z, fixef_id, "IV residualizer Z")
+
+  qrZ <- qr(Z, tol = tol)
+  PzX <- .project_qr(qrZ, X)
+  A <- crossprod(X, PzX)
+  qrA <- qr(A, tol = tol)
+  if (qrA$rank < ncol(A)) {
+    stop("IV residualizer is rank deficient: X'P_ZX is not full rank.", call. = FALSE)
+  }
+
+  V_t <- matrix(qr.coef(qrA, t(PzX)), nrow = ncol(X), ncol = nrow(X))
+  if (anyNA(V_t) || any(!is.finite(V_t))) {
+    stop("IV residualizer produced non-finite projector factors.", call. = FALSE)
+  }
+  V <- t(V_t)
+  storage.mode(X) <- "double"
+  storage.mode(V) <- "double"
+  list(U = X, V = V)
+}
+
 .run_scpc_rust_m1 <- function(coords,
                               latlong,
                               avc,
@@ -645,7 +721,14 @@ scpc <- function(model,
                               model_mat_cond,
                               cond_include_intercept,
                               k_use,
-                              nthreads) {
+                              nthreads,
+                              cl_vec = NULL,
+                              fe_id_0 = NULL,
+                              is_fixest_iv = FALSE,
+                              iv_cond_design = NULL,
+                              cond_fixef_id = NULL,
+                              method_actual = "exact",
+                              large_n_seed = 1) {
   n <- nrow(S)
   coords_mat <- as.matrix(coords)
   storage.mode(coords_mat) <- "double"
@@ -655,38 +738,160 @@ scpc <- function(model,
   wj_mat <- sweep(n * (S %*% t(bread_sub)), 2L, coef_use, "+")
   storage.mode(wj_mat) <- "double"
 
+  cl_drop <- if (is.null(cl_vec)) NULL else droplevels(cl_vec)
+  cl_id_0 <- if (is.null(cl_drop)) {
+    NULL
+  } else {
+    id <- as.integer(cl_drop) - 1L
+    storage.mode(id) <- "integer"
+    id
+  }
+
   if (isTRUE(uncond)) {
-    xj_mat <- NULL
-    xjs_mat <- NULL
-    Q_x <- NULL
+    rust_xj <- NULL
+    rust_xjs <- NULL
+    proj_u <- NULL
+    proj_v <- NULL
+    fe_id_0 <- NULL
   } else {
     xj_mat <- n * (model_mat_cond %*% t(bread_sub))
     storage.mode(xj_mat) <- "double"
-    xjs_mat <- sign(xj_mat)
+    if (is.null(cl_drop)) {
+      xjs_mat <- sign(xj_mat)
+    } else {
+      cl_sq <- as.matrix(rowsum(xj_mat^2, cl_drop))
+      cl_norm <- sqrt(cl_sq)[as.integer(cl_drop), , drop = FALSE]
+      xjs_mat <- ifelse(cl_norm > 0, xj_mat / cl_norm, 0)
+    }
     storage.mode(xjs_mat) <- "double"
-    Q_x <- .build_ols_orthonormal_basis(
-      model_mat_cond,
-      include_intercept = cond_include_intercept
-    )
+
+    if (isTRUE(is_fixest_iv)) {
+      iv_proj <- .build_iv_projector(
+        iv_cond_design$X,
+        iv_cond_design$Z,
+        fixef_id = cond_fixef_id
+      )
+      proj_u <- iv_proj$U
+      proj_v <- iv_proj$V
+      rust_xj <- xjs_mat
+      rust_xjs <- xj_mat
+    } else {
+      Q_x <- .build_ols_orthonormal_basis(
+        model_mat_cond,
+        include_intercept = cond_include_intercept
+      )
+      proj_u <- Q_x
+      proj_v <- Q_x
+      rust_xj <- xj_mat
+      rust_xjs <- xjs_mat
+    }
   }
 
-  res <- .Call(
-    "wrap__rust_run_exact_scpc",
-    coords_mat,
-    isTRUE(latlong),
-    as.double(avc),
-    isTRUE(uncond),
-    isTRUE(cvs),
-    coef_use,
-    wj_mat,
-    xj_mat,
-    xjs_mat,
-    Q_x,
-    Q_x,
-    0.001,
-    nthreads,
-    PACKAGE = "scpcR"
-  )
+  if (identical(method_actual, "approx")) {
+    norm_s <- .normalize_s(coords_mat, isTRUE(latlong))
+    coords_mat <- as.matrix(norm_s$coords)
+    storage.mode(coords_mat) <- "double"
+    perm <- norm_s$perm
+    wj_mat <- wj_mat[perm, , drop = FALSE]
+    if (!isTRUE(uncond)) {
+      if (!is.null(cl_drop)) {
+        cl_perm <- factor(as.character(cl_drop), levels = levels(cl_drop)[perm])
+        cl_id_0 <- as.integer(cl_perm) - 1L
+        storage.mode(cl_id_0) <- "integer"
+      } else {
+        rust_xj <- rust_xj[perm, , drop = FALSE]
+        rust_xjs <- rust_xjs[perm, , drop = FALSE]
+        proj_u <- proj_u[perm, , drop = FALSE]
+        proj_v <- proj_v[perm, , drop = FALSE]
+        if (!is.null(fe_id_0)) {
+          fe_id_0 <- fe_id_0[perm]
+        }
+      }
+    }
+  }
+
+  res <- if (identical(method_actual, "approx")) {
+    .Call(
+      "wrap__rust_run_approx_scpc",
+      coords_mat,
+      isTRUE(latlong),
+      as.double(avc),
+      isTRUE(uncond),
+      isTRUE(cvs),
+      coef_use,
+      wj_mat,
+      rust_xj,
+      rust_xjs,
+      proj_u,
+      proj_v,
+      0.001,
+      nthreads,
+      cl_id_0,
+      fe_id_0,
+      as.double(large_n_seed),
+      1000L,
+      20L,
+      1000000L,
+      PACKAGE = "scpcR"
+    )
+  } else if (!isTRUE(uncond) && (!is.null(fe_id_0) || isTRUE(is_fixest_iv))) {
+    .Call(
+      "wrap__rust_run_exact_scpc_full",
+      coords_mat,
+      isTRUE(latlong),
+      as.double(avc),
+      isTRUE(uncond),
+      isTRUE(cvs),
+      coef_use,
+      wj_mat,
+      rust_xj,
+      rust_xjs,
+      proj_u,
+      proj_v,
+      0.001,
+      nthreads,
+      cl_id_0,
+      fe_id_0,
+      PACKAGE = "scpcR"
+    )
+  } else if (is.null(cl_id_0)) {
+    .Call(
+      "wrap__rust_run_exact_scpc",
+      coords_mat,
+      isTRUE(latlong),
+      as.double(avc),
+      isTRUE(uncond),
+      isTRUE(cvs),
+      coef_use,
+      wj_mat,
+      rust_xj,
+      rust_xjs,
+      proj_u,
+      proj_v,
+      0.001,
+      nthreads,
+      PACKAGE = "scpcR"
+    )
+  } else {
+    .Call(
+      "wrap__rust_run_exact_scpc_clustered",
+      coords_mat,
+      isTRUE(latlong),
+      as.double(avc),
+      isTRUE(uncond),
+      isTRUE(cvs),
+      coef_use,
+      wj_mat,
+      rust_xj,
+      rust_xjs,
+      proj_u,
+      proj_v,
+      0.001,
+      nthreads,
+      cl_id_0,
+      PACKAGE = "scpcR"
+    )
+  }
 
   if (inherits(res, "extendr_error")) {
     stop(res$value, call. = FALSE)

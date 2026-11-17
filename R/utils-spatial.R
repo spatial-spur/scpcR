@@ -42,7 +42,8 @@
     lat2 <- S2[, 2] * pi / 180
     dlon <- 0.5 * (lon1 - lon2)
     dlat <- 0.5 * (lat1 - lat2)
-    asin(sqrt(sin(dlat)^2 + cos(lat1) * cos(lat2) * sin(dlon)^2)) / pi
+    a <- sin(dlat)^2 + cos(lat1) * cos(lat2) * sin(dlon)^2
+    asin(sqrt(pmin(pmax(a, 0), 1))) / pi
   } else {
     sqrt(rowSums((S1 - S2)^2))
   }
@@ -50,22 +51,153 @@
 
 .getc0fromavc <- function(dist, avc0) {
   ## Solve for exponential kernel parameter c0 such that
-  ## mean(exp(-c0 * dist)) == avc0, using bisection.
-  c0 <- c1 <- 10
-  while (.getavc(c0, dist) < avc0) {
+  ## mean(exp(-c0 * dist)) == avc0, using a scale-invariant bracket
+  ## and Illinois / bisection root solver.
+  dist <- as.numeric(dist)
+  n_dist <- length(dist)
+  if (n_dist == 0L) {
+    stop("At least two locations are required.")
+  }
+  if (any(!is.finite(dist) | dist < 0)) {
+    stop("Distances must be finite and nonnegative.")
+  }
+  floor_corr <- mean(dist == 0)
+  pos <- dist[dist > 0]
+  if (length(pos) == 0L) {
+    stop("At least two distinct locations are required.")
+  }
+  if (!is.numeric(avc0) || length(avc0) != 1L || !is.finite(avc0) || avc0 <= floor_corr || avc0 >= 1.0) {
+    stop("Target correlation must lie above the co-located-pair fraction and below one.")
+  }
+
+  mean_pos <- mean(pos)
+  target_pos <- (avc0 - floor_corr) / (1 - floor_corr)
+  near_one <- avc0 > 0.9999
+  eval_res <- function(c) {
+    if (near_one) {
+      (1 - avc0) + sum(expm1(-c * pos)) / n_dist
+    } else {
+      mean(exp(-c * dist)) - avc0
+    }
+  }
+
+  raw_init <- if (is.finite(mean_pos) && mean_pos > 0) {
+    cand <- -log(target_pos) / mean_pos
+    if (is.finite(cand) && cand > 0) cand else NA_real_
+  } else {
+    NA_real_
+  }
+  if (is.na(raw_init)) {
+    max_d <- max(pos)
+    raw_init <- min(max(.Machine$double.xmin, 1 / max_d), .Machine$double.xmax * 0.5)
+  }
+
+  c0 <- raw_init
+  c1 <- raw_init
+  f0 <- eval_res(c0)
+  if (f0 == 0) return(c0)
+  f1 <- f0
+
+  if (f0 < 0) {
     c1 <- c0
-    c0 <- 0.5 * c0
+    f1 <- f0
+    for (iter in seq_len(1024L)) {
+      c0 <- 0.5 * c0
+      if (c0 == 0 || !is.finite(c0)) {
+        stop("Decay calibration lower bracket underflowed; distances may be degenerate.")
+      }
+      f0 <- eval_res(c0)
+      if (f0 == 0) return(c0)
+      if (f0 > 0) break
+      c1 <- c0
+      f1 <- f0
+    }
+    if (f0 < 0) {
+      stop("Decay calibration lower bracket did not enclose root.")
+    }
+  } else {
+    for (iter in seq_len(1024L)) {
+      c0 <- c1
+      f0 <- f1
+      if (c1 >= .Machine$double.xmax * 0.5) {
+        c1 <- .Machine$double.xmax
+        f1 <- eval_res(c1)
+        break
+      }
+      c1 <- 2 * c1
+      f1 <- eval_res(c1)
+      if (f1 == 0) return(c1)
+      if (f1 < 0) break
+    }
+    if (f1 > 0) {
+      stop("Spatial decay calibration failed to bracket upper decay scale.")
+    }
   }
-  while (.getavc(c1, dist) > avc0 & c1 < 5000) {
-    c0 <- c1
-    c1 <- 2 * c1
+
+  scale_gap <- max(min(avc0 - floor_corr, 1 - avc0), 1e-15)
+  residual_tol <- 1e-12 * scale_gap
+  side <- 0L
+  cmid <- c0 + 0.5 * (c1 - c0)
+  for (iter in seq_len(200L)) {
+    fallback_mid <- if (c0 > 0 && c1 / c0 > 4) {
+      geom <- sqrt(c0 * c1)
+      if (is.finite(geom) && geom > c0 && geom < c1) geom else c0 + 0.5 * (c1 - c0)
+    } else {
+      c0 + 0.5 * (c1 - c0)
+    }
+    if (iter %% 4L == 0L && c0 > 0 && c1 / c0 > 4) {
+      cmid <- fallback_mid
+    } else {
+      cmid <- c0 - f0 * ((c1 - c0) / (f1 - f0))
+      if (!is.finite(cmid) || cmid <= c0 || cmid >= c1) {
+        cmid <- fallback_mid
+      }
+    }
+    fmid <- eval_res(cmid)
+    if (abs(fmid) <= residual_tol) {
+      return(cmid)
+    }
+    if (fmid > 0) {
+      c0 <- cmid
+      f0 <- fmid
+      if (side == -1L) f1 <- 0.5 * f1
+      side <- -1L
+    } else {
+      c1 <- cmid
+      f1 <- fmid
+      if (side == 1L) f0 <- 0.5 * f0
+      side <- 1L
+    }
+    c_est <- c0 + 0.5 * (c1 - c0)
+    if ((c1 - c0) <= 1e-12 * max(c_est, .Machine$double.xmin)) {
+      return(c_est)
+    }
   }
-  repeat {
-    c <- sqrt(c0 * c1)
-    if (.getavc(c, dist) > avc0) c0 <- c else c1 <- c
-    if (c1 - c0 < 0.001) break
+  c_est <- c0 + 0.5 * (c1 - c0)
+  if (abs(eval_res(c_est)) <= 1e-8 * scale_gap || (c1 - c0) <= 1e-12 * max(c_est, .Machine$double.xmin)) {
+    return(c_est)
   }
-  c
+  stop("Spatial decay calibration did not converge.")
+}
+
+.angular_deficit <- function(sine2, denominator, normalized_eigenvalues) {
+  product <- rep.int(1.0, length(sine2))
+  deficit <- rep.int(0.0, length(sine2))
+  for (lam in normalized_eigenvalues) {
+    extra <- lam * denominator
+    inv <- 1.0 / (sine2 + extra)
+    deficit <- deficit + product * extra * inv
+    product <- product * sine2 * inv
+  }
+  deficit / ((1.0 + sqrt(product)) * denominator)
+}
+
+.angular_integrand <- function(cosine2, eigenvalues) {
+  if (cosine2 <= 0) return(0.0)
+  large <- eigenvalues > cosine2
+  log_terms <- log1p(eigenvalues[!large] / cosine2)
+  large_evals <- eigenvalues[large]
+  exp(-0.5 * (sum(log_terms) + sum(log(large_evals) - log(cosine2) + log1p(cosine2 / large_evals))))
 }
 
 #' @importFrom gaussquad legendre.quadrature.rules
@@ -76,50 +208,119 @@
 .getrp <- function(Om, cv) {
   ## Rejection probability for the SCPC test given Omega matrix Om
   ## and normalised critical value cv (= cv/sqrt(q) in paper notation).
-  ## Uses Gauss-Legendre quadrature over the characteristic function.
-  Omx <- -cv^2 * Om
-  Omx[1, ] <- Om[1, ]
-  evals_raw <- Re(eigen(Omx, only.values = TRUE)$values)
-  evals <- -evals_raw[evals_raw < 0]
-  if (!length(evals)) return(0)
-  denom <- max(evals_raw)
-  if (!is.finite(denom) || denom <= 0) return(0)
-  evals <- evals / denom
-  tot <- 0
-  for (j in seq_along(.GQx)) {
-    u <- .GQx[j]
-    arg <- (1 - u^2) * exp(sum(log1p(evals / (1 - u^2))))
-    if (!is.finite(arg) || arg <= 0) next
-    tot <- tot + .GQw[j] / sqrt(arg)
+  if (!is.finite(cv)) {
+    stop("SCPC critical value must be finite.")
   }
-  as.numeric(tot * 2 / pi)
+  if (cv <= 0) return(1.0)
+  max_om <- max(abs(Om))
+  if (!is.finite(max_om) || max_om <= 0) return(0.0)
+  Om <- Om / max_om
+  if (cv > 1.0) {
+    pos_scale <- 1.0 / (cv * cv)
+    neg_scale <- -1.0
+  } else {
+    pos_scale <- 1.0
+    neg_scale <- -(cv * cv)
+  }
+  Omx <- neg_scale * Om
+  Omx[1L, ] <- pos_scale * Om[1L, ]
+  evals_raw <- Re(eigen(Omx, only.values = TRUE)$values)
+  denom <- max(evals_raw)
+  if (!is.finite(denom) || denom <= 0) return(0.0)
+  evals <- -evals_raw[evals_raw < 0]
+  if (length(evals) == 0L) return(1.0)
+  evals <- evals / denom
+  if (length(evals) == 1L) {
+    return(as.numeric((2 / pi) * atan2(1, sqrt(evals[1L]))))
+  }
+  if (max(evals) - min(evals) <= 1e-12 * min(evals)) {
+    q_eff <- length(evals)
+    return(as.numeric(2 * stats::pt(-sqrt(q_eff * evals[1L]), df = q_eff)))
+  }
+  scale2 <- sum(evals)
+  if (scale2 == 0) return(1.0)
+  complement <- (scale2 < 0.0625)
+  if (complement) evals <- evals / scale2
+
+  eval_panel <- function(left, right) {
+    angle <- left + (right - left) * .GQx
+    cosine2 <- cos(angle)^2
+    if (complement) {
+      sine2 <- sin(angle)^2
+      vals <- .angular_deficit(sine2, cosine2 + scale2 * sine2, evals)
+    } else {
+      product <- rep.int(1.0, length(angle))
+      for (lam in evals) {
+        product <- product * (cosine2 / (cosine2 + lam))
+      }
+      vals <- sqrt(product)
+      tiny <- product < .Machine$double.xmin
+      if (any(tiny)) {
+        vals[tiny] <- vapply(cosine2[tiny], .angular_integrand, 0.0, eigenvalues = evals)
+      }
+    }
+    sum(.GQw * vals) * (right - left)
+  }
+
+  end <- pi / 2
+  whole <- eval_panel(0, end)
+  base_tol <- if (abs(whole) < 1e-8) 1e-10 * abs(whole) else 1e-11
+  pending <- list(list(left = 0, right = end, whole = whole, tol = base_tol, depth = 0L))
+  total <- 0.0
+  while (length(pending) > 0L) {
+    cur <- pending[[length(pending)]]
+    pending[[length(pending)]] <- NULL
+    mid <- 0.5 * (cur$left + cur$right)
+    left_val <- eval_panel(cur$left, mid)
+    right_val <- eval_panel(mid, cur$right)
+    if (cur$depth >= 20L || abs(left_val + right_val - cur$whole) <= max(cur$tol, 1e-11 * abs(cur$whole))) {
+      total <- total + left_val + right_val
+    } else {
+      pending[[length(pending) + 1L]] <- list(
+        left = mid, right = cur$right, whole = right_val, tol = cur$tol * 0.5, depth = cur$depth + 1L
+      )
+      pending[[length(pending) + 1L]] <- list(
+        left = cur$left, right = mid, whole = left_val, tol = cur$tol * 0.5, depth = cur$depth + 1L
+      )
+    }
+  }
+  prob <- if (complement) 1.0 - sqrt(scale2) * total * (2 / pi) else total * (2 / pi)
+  as.numeric(max(0.0, min(1.0, prob)))
 }
 
 .maxrp <- function(Oms, q, cv) {
   ## Largest rejection probability across a list of Omega matrices
-  rps <- vapply(Oms, function(Om) .getrp(Om[1:(q + 1), 1:(q + 1)], cv), 0.0)
+  rps <- vapply(Oms, function(Om) .getrp(Om[1:(q + 1), 1:(q + 1), drop = FALSE], cv), 0.0)
   list(max = max(rps), i = which.max(rps))
 }
 
 .getcv <- function(Oms, q, level) {
   ## Two-sided critical value that controls size at the given level,
   ## maximised over the Omega grid.
+  step <- 1 / sqrt(q)
+  tol <- 0.001 * step
   rp <- 1
-  i <- 1
-  cv0 <- stats::qt(1 - level / 2, df = q) / sqrt(q)
-  while (rp > level) {
+  i <- 1L
+  cv0 <- stats::qt(1 - level / 2, df = q) * step
+  for (outer_iter in seq_len(length(Oms) + 4L)) {
+    if (rp <= level) break
+    Om_i <- Oms[[i]][1:(q + 1), 1:(q + 1), drop = FALSE]
     cv1 <- cv0
-    repeat {
-      if (.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv1) > level) {
+    for (iter in seq_len(1024L)) {
+      if (.getrp(Om_i, cv1) > level) {
         cv0 <- cv1
-        cv1 <- cv1 + 1 / sqrt(q)
+        cv1 <- cv1 + if (iter <= 32L) step else cv1
       } else {
         break
       }
     }
-    while (cv1 - cv0 > 0.001 / sqrt(q)) {
+    if (.getrp(Om_i, cv1) > level) {
+      stop("SCPC critical value could not be bracketed.")
+    }
+    while (cv1 - cv0 > tol) {
       cv <- 0.5 * (cv0 + cv1)
-      if (.getrp(Oms[[i]][1:(q + 1), 1:(q + 1)], cv) > level) cv0 <- cv else cv1 <- cv
+      if (cv == cv0 || cv == cv1) break
+      if (.getrp(Om_i, cv) > level) cv0 <- cv else cv1 <- cv
     }
     maxrp <- .maxrp(Oms, q, cv1)
     if (maxrp$i == i) break
@@ -237,8 +438,10 @@
     distvec[idx] <- .lvech(ms[[i]]$distmat)
   }
 
+  floor_corr <- mean(distvec == 0)
+  minavc_eff <- floor_corr + (1 - floor_corr) * minavc
   c0 <- .getc0fromavc(distvec, avc0)
-  cmax <- .getc0fromavc(distvec, minavc)
+  cmax <- .getc0fromavc(distvec, minavc_eff)
 
   Wall <- matrix(0, n, capN * qmax)
   for (i in seq_len(capN)) {
@@ -353,6 +556,9 @@
   method <- .validate_scpc_method(method)
   large_n_seed <- .validate_large_n_seed(large_n_seed)
   n <- nrow(coords)
+  if (n < 2L) {
+    stop("At least two locations are required.")
+  }
 
   cgridfac <- 1.2
   minavc <- 0.00001
@@ -377,24 +583,33 @@
   coords_use <- coords
   perm <- seq_len(n)
   random_t <- NULL
+  tied <- FALSE
+
+  if (identical(method_actual, "exact")) {
+    distmat <- .getdistmat(coords, latlong)
+    distv <- .lvech(distmat)
+    floor_corr <- mean(distv == 0)
+    minavc_eff <- floor_corr + (1 - floor_corr) * minavc
+    c0 <- .getc0fromavc(distv, avc0)
+    cmax <- .getc0fromavc(distv, minavc_eff)
+    coords_use <- coords
+    perm <- seq_len(n)
+    random_t <- NULL
+  } else {
+    norm_s <- .normalize_s(coords, latlong)
+    coords_use <- norm_s$coords
+    perm <- norm_s$perm
+  }
 
   repeat {
     qmax <- min(qmax, n - 1)
     if (identical(method_actual, "exact")) {
-      distmat <- .getdistmat(coords, latlong)
-      distv <- .lvech(distmat)
-      c0 <- .getc0fromavc(distv, avc0)
-      cmax <- .getc0fromavc(distv, minavc)
       W <- .getW(distmat, c0, qmax)
+      tied <- isTRUE(attr(W, "tied"))
+      attr(W, "tied") <- NULL
       Oms <- .getOms(distmat, c0, cmax, W, cgridfac)
-      coords_use <- coords
-      perm <- seq_len(n)
-      random_t <- NULL
     } else {
       random_t <- large_n_seed
-      norm_s <- .normalize_s(coords, latlong)
-      coords_use <- norm_s$coords
-      perm <- norm_s$perm
       ln_w <- .lnset_wc0(
         coords_use, avc0, qmax, minavc, latlong,
         capN = large_n_capN, m = large_n_m, random_t = random_t
@@ -408,6 +623,7 @@
       )
       Oms <- oms_res$Oms
       random_t <- oms_res$state
+      tied <- FALSE
     }
     fin <- .setfinalW(Oms, W, qmax)
     if (fin$q < qmax || qmax == n - 1) break
@@ -425,7 +641,8 @@
     distmat = distmat,
     method = method_actual,
     large_n = identical(method_actual, "approx"),
-    random_state = random_t
+    random_state = random_t,
+    tied = isTRUE(tied)
   )
 }
 

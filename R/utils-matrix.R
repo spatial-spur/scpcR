@@ -20,16 +20,29 @@
   n <- nrow(distmat)
   Sig <- exp(-c0 * distmat)
   Sig_d <- .demeanmat(Sig)
-  if (requireNamespace("RSpectra", quietly = TRUE) && qmax < n - 1) {
-    eig <- RSpectra::eigs_sym(Sig_d, k = qmax, which = "LA")
-    ord <- order(Re(eig$values), decreasing = TRUE)
-    V <- eig$vectors[, ord, drop = FALSE]
+  Sig_centered <- Sig_d - (n + 1) / n
+  k_check <- min(qmax + 1L, n - 1L)
+  if (requireNamespace("RSpectra", quietly = TRUE) && k_check < n - 1L) {
+    eig <- RSpectra::eigs_sym(Sig_centered, k = k_check, which = "LA")
+    vals <- Re(eig$values)
+    ord <- order(vals, decreasing = TRUE)
+    vals_check <- vals[ord[seq_len(k_check)]]
+    V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
   } else {
-    eig <- eigen(Sig_d, symmetric = TRUE)
-    ord <- order(Re(eig$values), decreasing = TRUE)
+    eig <- eigen(Sig_centered, symmetric = TRUE)
+    vals <- Re(eig$values)
+    ord <- order(vals, decreasing = TRUE)
+    vals_check <- vals[ord[seq_len(k_check)]]
     V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
   }
-  cbind(rep(1, n) / sqrt(n), V)
+  tied <- FALSE
+  if (length(vals_check) >= 2L) {
+    tol <- 1.6e-11 * max(abs(vals_check[1L]), 1.0)
+    tied <- any(vals_check[-length(vals_check)] - vals_check[-1L] <= tol)
+  }
+  W <- cbind(rep(1, n) / sqrt(n), V)
+  attr(W, "tied") <- tied
+  W
 }
 
 .gettau <- function(y, W) {

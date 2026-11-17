@@ -1,9 +1,11 @@
 TARGET_DIR = rust/target
-LIBDIR = $(TARGET_DIR)/release
+WIN_TARGET ?= x86_64-pc-windows-gnu
+LIBDIR = $(TARGET_DIR)/$(WIN_TARGET)/release
 STATLIB = $(LIBDIR)/libscpc_rust.a
 
 SPATIAL_RUST ?= 1
 CARGO ?= cargo
+OFFLINE_FLAG = $(if $(wildcard rust/vendor),--offline,)
 
 ifeq ($(strip $(SPATIAL_RUST)),0)
   RUST_AVAILABLE :=
@@ -37,4 +39,4 @@ $(SHLIB): $(RUST_DEPS)
 .PHONY: $(STATLIB)
 $(STATLIB):
 	"$(CARGO)" --version && rustc --version
-	CARGO_TARGET_DIR="$(CURDIR)/$(TARGET_DIR)" "$(CARGO)" build --release --manifest-path rust/Cargo.toml --offline --locked
+	CARGO_TARGET_DIR="$(CURDIR)/$(TARGET_DIR)" "$(CARGO)" build --release --target $(WIN_TARGET) --manifest-path rust/Cargo.toml $(OFFLINE_FLAG) --locked

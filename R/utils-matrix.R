@@ -173,9 +173,10 @@
       include_intercept = include_intercept,
       fixef_id = fixef_id
     )
-    Rx <- sweep(Wx[, -1, drop = FALSE], 1, xjs, `*`)
+    ## Conditional OLS weights are S_x M_V D_x B_q.
+    Rx <- sweep(Wx[, -1, drop = FALSE], 1, xj, `*`)
     Rr <- residualize(Rx)
-    Wx[, -1] <- sweep(Rr, 1, xj, `*`)
+    Wx[, -1] <- sweep(Rr, 1, xjs, `*`)
   }
   Wx
 }
@@ -212,12 +213,7 @@
 # ---------------------------------------------------------------------------
 .orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
                                      include_intercept = TRUE) {
-  ## Construct the conditional Wx matrix for clustered SCPC following the
-  ## Stata set_Wx_cluster algorithm (Mueller & Watson):
-  ##   1. Within-cluster normalization of influence directions
-  ##   2. Expand cluster-level W to individual observations
-  ##   3. Orthogonalize at individual level against regressors
-  ##   4. Aggregate back to cluster level
+  ## Clustered OLS denominator weights are Xi_s' M_V Xi B_q.
   ##
   ## W:               nclust x (q+1) cluster-level spatial projection matrix
   ## cl_vec:          factor of cluster membership (length n_individual)
@@ -246,9 +242,9 @@
       model_mat_indiv,
       include_intercept = include_intercept
     )
-    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xjs_indiv, `*`)
+    Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xj_indiv, `*`)
     R <- residualize(Y)
-    Wx[, -1] <- rowsum(sweep(R, 1, xj_indiv, `*`), cl_vec)
+    Wx[, -1] <- rowsum(sweep(R, 1, xjs_indiv, `*`), cl_vec)
   }
 
   Wx

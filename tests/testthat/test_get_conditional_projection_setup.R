@@ -6,7 +6,7 @@ test_that("get_conditional_projection_setup keeps the baseline matrix for lm", {
   setup <- .get_conditional_projection_setup(fit, model_mat, n = 3, uncond = FALSE)
 
   expect_equal(setup$model_mat, model_mat, tolerance = 1e-12)
-  expect_true(setup$include_intercept)
+  expect_false(setup$include_intercept)
   expect_null(setup$fixef_id)
 })
 

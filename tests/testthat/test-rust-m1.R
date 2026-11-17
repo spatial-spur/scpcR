@@ -139,12 +139,42 @@ json_rows_to_matrix <- function(rows) {
   do.call(rbind, lapply(rows, as.numeric))
 }
 
-assert_scpc_matches_fixture <- function(out, fixture, tol = 1e-10) {
+test_that("conditional OLS cutoffs match the fitted design with and without an intercept", {
+  sites <- c(0, 1, 2, 4, 6)
+  x <- c(-1, -4, 2, 2, 1)
+  d <- data.frame(s = sites, x = x, y = x + (sites == 0))
+  backends <- "fallback"
+  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+    backends <- c(backends, "rust")
+  }
+  for (backend in backends) {
+    with_intercept <- scpc(lm(y ~ x, d), d, coords_euclidean = "s", avc = .5, cvs = TRUE, backend = backend)
+    without_intercept <- scpc(lm(y ~ x - 1, d), d, coords_euclidean = "s", avc = .5, cvs = TRUE, backend = backend)
+    expect_lt(abs(with_intercept$scpccvs["x", "5%"] - 17.625169), .002)
+    expect_lt(abs(without_intercept$scpccvs["x", "5%"] - 9.973326), .002)
+  }
+
+  d <- d[rep(seq_len(nrow(d)), each = 2), ]
+  d$x <- d$x + c(-.25, .25)
+  d$y <- d$x + (d$s == 0)
+  with_intercept <- scpc(lm(y ~ x, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = "fallback")
+  without_intercept <- scpc(lm(y ~ x - 1, d), d, coords_euclidean = "s", cluster = "s", avc = .5, cvs = TRUE, backend = "fallback")
+  expect_lt(abs(with_intercept$scpccvs["x", "5%"] - 17.380977), .002)
+  expect_lt(abs(without_intercept$scpccvs["x", "5%"] - 9.902023), .002)
+})
+
+assert_scpc_matches_fixture <- function(out, fixture, uncond, tol = 1e-10) {
   expected_stats <- json_rows_to_matrix(fixture$scpcstats)
   rownames(expected_stats) <- unlist(fixture$coef_names)
   colnames(expected_stats) <- c("Coef", "Std_Err", "t", "P>|t|", "2.5 %", "97.5 %")
 
-  expect_equal(unname(out$scpcstats), unname(expected_stats), tolerance = tol)
+  # Frozen fixtures contain the historical conditional calibration.
+  stable_cols <- if (uncond) seq_len(ncol(expected_stats)) else 1:3
+  expect_equal(
+    unname(out$scpcstats[, stable_cols]),
+    unname(expected_stats[, stable_cols]),
+    tolerance = tol
+  )
   expect_equal(rownames(out$scpcstats), rownames(expected_stats))
   expect_equal(out$c0, fixture$c0, tolerance = tol)
   expect_equal(out$cv, fixture$cv, tolerance = tol)
@@ -152,13 +182,13 @@ assert_scpc_matches_fixture <- function(out, fixture, tol = 1e-10) {
 
   if (is.null(fixture$scpccvs)) {
     expect_null(out$scpccvs)
-  } else {
+  } else if (uncond) {
     expected_cvs <- json_rows_to_matrix(fixture$scpccvs)
     expect_equal(unname(out$scpccvs), unname(expected_cvs), tolerance = tol)
   }
 }
 
-test_that("rust and fallback backends match m1_exact_scpc.json within 1e-10", {
+test_that("Rust and fallback agree and preserve the stable Milestone 1 results", {
   fixture_path <- find_spur_file("spatial-rust/fixtures/m1_exact_scpc.json")
   bench_200_path <- find_spur_file("verification/data/bench_200.csv")
   bench_1000_path <- find_spur_file("verification/data/bench_1000.csv")
@@ -186,8 +216,9 @@ test_that("rust and fallback backends match m1_exact_scpc.json within 1e-10", {
     list(name = "bench_1000_latlong_cond", fit = fit1000, data = d1000, latlong = TRUE, uncond = FALSE, cvs = TRUE)
   )
 
-  for (bk in backends) {
-    for (cs in cases) {
+  for (cs in cases) {
+    outputs <- list()
+    for (bk in backends) {
       if (cs$latlong && bk == "fallback" && !requireNamespace("geodist", quietly = TRUE)) {
         next
       }
@@ -207,7 +238,12 @@ test_that("rust and fallback backends match m1_exact_scpc.json within 1e-10", {
         )
       }
       expect_identical(out$backend, bk)
-      assert_scpc_matches_fixture(out, fixtures[[cs$name]], tol = 1e-10)
+      assert_scpc_matches_fixture(out, fixtures[[cs$name]], uncond = cs$uncond)
+      outputs[[bk]] <- out
+    }
+    if (length(outputs) == 2L) {
+      expect_equal(outputs$rust$scpcstats, outputs$fallback$scpcstats, tolerance = 1e-10)
+      expect_equal(outputs$rust$scpccvs, outputs$fallback$scpccvs, tolerance = 1e-10)
     }
   }
 

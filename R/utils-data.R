@@ -216,7 +216,8 @@
 }
 
 .get_conditional_projection_setup <- function(model, model_mat, n, uncond) {
-  setup <- list(model_mat = as.matrix(model_mat), include_intercept = TRUE, fixef_id = NULL)
+  # The fitted model matrix already contains any intercept.
+  setup <- list(model_mat = as.matrix(model_mat), include_intercept = FALSE, fixef_id = NULL)
   if (isTRUE(uncond) || !inherits(model, "fixest") || !.has_fixest_fe(model)) {
     return(setup)
   }

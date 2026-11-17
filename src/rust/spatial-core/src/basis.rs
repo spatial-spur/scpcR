@@ -191,9 +191,9 @@ fn contrast_covariance(distances: &[f64], n: usize, scale: f64) -> Vec<f64> {
     covariance
 }
 
-struct Eigenpairs {
-    values: Vec<f64>,
-    vectors: Vec<f64>,
+pub(crate) struct Eigenpairs {
+    pub(crate) values: Vec<f64>,
+    pub(crate) vectors: Vec<f64>,
 }
 
 fn eigen_tolerance(leading: f64) -> f64 {
@@ -206,7 +206,7 @@ fn has_tied_values(values: &[f64]) -> bool {
 }
 
 #[cfg(all(target_vendor = "apple", not(feature = "portable")))]
-fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, CoreError> {
+pub(crate) fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, CoreError> {
     let mut values = vec![0.0; n];
     let mut vectors = vec![0.0; n * q];
     let mut support = vec![0; 2 * q];
@@ -257,7 +257,7 @@ fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, Cor
 }
 
 #[cfg(any(not(target_vendor = "apple"), feature = "portable"))]
-fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, CoreError> {
+pub(crate) fn dense_eigenpairs(a: &mut [f64], n: usize, q: usize) -> Result<Eigenpairs, CoreError> {
     let mut values = vec![0.0; n];
     let mut vectors = vec![0.0; n * n];
     linalg::symmetric_eigen(a, &mut values, Some(&mut vectors))?;

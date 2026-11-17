@@ -2,8 +2,11 @@
 
 use extendr_api::prelude::*;
 use spatial_core::{
-    run_approx_scpc, run_exact_scpc, ApproxScpcRequest, CoreError, ErrorKind, ExactScpcOutput,
-    ExactScpcRequest, Metric,
+    run_approx_scpc, run_exact_scpc, run_spur_halflife, run_spur_i0, run_spur_i0_resid,
+    run_spur_i1, run_spur_i1_resid, run_spur_pipeline, run_spur_transform, ApproxScpcRequest,
+    CoreError, ErrorKind, ExactScpcOutput, ExactScpcRequest, Metric, SpurHalfLifeOutput,
+    SpurHalfLifeRequest, SpurI0Output, SpurI1Output, SpurPipelineRequest, SpurTestRequest,
+    SpurTransformKind, SpurTransformRequest,
 };
 
 fn core_err(err: CoreError) -> Error {
@@ -619,6 +622,587 @@ pub fn rust_run_approx_scpc(
     )
 }
 
+fn parse_r_nthreads(nthreads: Nullable<i32>) -> extendr_api::Result<Option<usize>> {
+    match nthreads {
+        Nullable::Null => Ok(None),
+        Nullable::NotNull(t) => {
+            if t == i32::MIN || t <= 0 {
+                return Err(Error::Other(
+                    "`nthreads` must be a positive integer.".into(),
+                ));
+            }
+            Ok(Some(t as usize))
+        }
+    }
+}
+
+fn parse_r_index_vec(
+    ids: Nullable<Integers>,
+    upper_bound: usize,
+    name: &str,
+    label: &str,
+) -> extendr_api::Result<Option<Vec<usize>>> {
+    match ids {
+        Nullable::Null => Ok(None),
+        Nullable::NotNull(ints) => {
+            let slice = ints
+                .as_robj()
+                .as_integer_slice()
+                .ok_or_else(|| Error::ExpectedInteger(ints.as_robj().clone()))?;
+            let mut out = Vec::with_capacity(slice.len());
+            for &val in slice {
+                if val == i32::MIN || val < 0 || (val as usize) >= upper_bound {
+                    return Err(Error::Other(format!(
+                        "`{name}` entries must be non-NA integers in 0..{} for {label} (got {val})",
+                        upper_bound
+                    )));
+                }
+                out.push(val as usize);
+            }
+            Ok(Some(out))
+        }
+    }
+}
+
+fn build_r_spur_i0_list(out: SpurI0Output, n_y: usize) -> extendr_api::Result<List> {
+    let n_rho = out.rho_grid.len();
+    let cvalue_mat = row_major_to_rmatrix(&out.cvalue_mat, n_rho, 3)?;
+    let pvalue_mat = row_major_to_rmatrix(&out.pvalue_mat, n_rho, n_y)?;
+    List::from_names_and_values(
+        [
+            "LR",
+            "pvalue",
+            "cvalue",
+            "ha_parm",
+            "cvalue_mat",
+            "pvalue_mat",
+            "rho_grid",
+            "tied",
+        ],
+        [
+            Robj::from(out.lr),
+            Robj::from(out.pvalue),
+            Robj::from(out.cvalue),
+            Robj::from(out.ha_param),
+            Robj::from(cvalue_mat),
+            Robj::from(pvalue_mat),
+            Robj::from(out.rho_grid),
+            Robj::from(out.tied),
+        ],
+    )
+}
+
+fn build_r_spur_i1_list(out: SpurI1Output) -> extendr_api::Result<List> {
+    List::from_names_and_values(
+        ["LR", "pvalue", "cv_vec", "ha_parm", "tied"],
+        [
+            Robj::from(out.lr),
+            Robj::from(out.pvalue),
+            Robj::from(out.cvalue),
+            Robj::from(out.ha_param),
+            Robj::from(out.tied),
+        ],
+    )
+}
+
+fn build_r_spur_hl_list(out: SpurHalfLifeOutput) -> extendr_api::Result<List> {
+    List::from_names_and_values(
+        [
+            "hl_ci_lower",
+            "hl_ci_upper",
+            "max_dist",
+            "pv_mat",
+            "hl_grid_ho",
+            "tied",
+        ],
+        [
+            Robj::from(out.ci_lower),
+            Robj::from(out.ci_upper),
+            Robj::from(out.max_dist),
+            Robj::from(out.pv_mat),
+            Robj::from(out.hl_grid_ho),
+            Robj::from(out.tied),
+        ],
+    )
+}
+
+fn run_spur_test_r_impl(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    x_in: Nullable<RMatrix<f64>>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+    is_i0: bool,
+) -> extendr_api::Result<List> {
+    let nthreads_usize = parse_r_nthreads(nthreads)?;
+    let n = coords.nrows();
+    let d = coords.ncols();
+    if y.nrows() != n || y.ncols() == 0 {
+        return Err(Error::Other(format!(
+            "Y dimensions ({} x {}) incompatible with coords rows n = {n}",
+            y.nrows(),
+            y.ncols()
+        )));
+    }
+    let n_y = y.ncols();
+    let q = emat.nrows();
+    let nrep = emat.ncols();
+    let metric = if latlong {
+        Metric::GreatCircleFractionLonLat
+    } else {
+        Metric::Euclidean
+    };
+
+    let coords_rm = col_major_to_row_major(coords.data(), n, d)?;
+    let y_rm = col_major_to_row_major(y.data(), n, n_y)?;
+    let emat_rm = col_major_to_row_major(emat.data(), q, nrep)?;
+    let (x_rm, k_x) = match x_in {
+        Nullable::Null => (None, 0usize),
+        Nullable::NotNull(xm) => {
+            if xm.nrows() != n || xm.ncols() == 0 {
+                return Err(Error::Other(format!(
+                    "X_in dimensions ({} x {}) incompatible with n = {n}",
+                    xm.nrows(),
+                    xm.ncols()
+                )));
+            }
+            let kx = xm.ncols();
+            (Some(col_major_to_row_major(xm.data(), n, kx)?), kx)
+        }
+    };
+
+    let req = SpurTestRequest {
+        coords: &coords_rm,
+        n,
+        d,
+        metric,
+        y: &y_rm,
+        n_y,
+        x_in: x_rm.as_deref(),
+        k_x,
+        emat: &emat_rm,
+        q,
+        nrep,
+        nthreads: nthreads_usize,
+    };
+
+    if is_i0 {
+        let out = if req.x_in.is_some() {
+            run_spur_i0_resid(&req)
+        } else {
+            run_spur_i0(&req)
+        }
+        .map_err(core_err)?;
+        build_r_spur_i0_list(out, n_y)
+    } else {
+        let out = if req.x_in.is_some() {
+            run_spur_i1_resid(&req)
+        } else {
+            run_spur_i1(&req)
+        }
+        .map_err(core_err)?;
+        build_r_spur_i1_list(out)
+    }
+}
+
+pub fn run_spur_i0_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_test_r_impl(coords, latlong, y, Nullable::Null, emat, nthreads, true)
+}
+
+pub fn run_spur_i1_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_test_r_impl(coords, latlong, y, Nullable::Null, emat, nthreads, false)
+}
+
+pub fn run_spur_i0_resid_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_test_r_impl(coords, latlong, y, Nullable::NotNull(x_in), emat, nthreads, true)
+}
+
+pub fn run_spur_i1_resid_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_test_r_impl(coords, latlong, y, Nullable::NotNull(x_in), emat, nthreads, false)
+}
+
+pub fn run_spur_halflife_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: Doubles,
+    emat: RMatrix<f64>,
+    level: f64,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    let nthreads_usize = parse_r_nthreads(nthreads)?;
+    let n = coords.nrows();
+    let d = coords.ncols();
+    let y_slice = y
+        .as_robj()
+        .as_real_slice()
+        .ok_or_else(|| Error::ExpectedReal(y.as_robj().clone()))?;
+    if y_slice.len() != n {
+        return Err(Error::Other(format!(
+            "y length {} does not match coords rows n = {n}",
+            y_slice.len()
+        )));
+    }
+    let q = emat.nrows();
+    let nrep = emat.ncols();
+    let metric = if latlong {
+        Metric::GreatCircleFractionLonLat
+    } else {
+        Metric::Euclidean
+    };
+    let coords_rm = col_major_to_row_major(coords.data(), n, d)?;
+    let emat_rm = col_major_to_row_major(emat.data(), q, nrep)?;
+    let out = run_spur_halflife(&SpurHalfLifeRequest {
+        coords: &coords_rm,
+        n,
+        d,
+        metric,
+        y: y_slice,
+        emat: &emat_rm,
+        q,
+        nrep,
+        level,
+        nthreads: nthreads_usize,
+    })
+    .map_err(core_err)?;
+    build_r_spur_hl_list(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_spur_transform_r(
+    kind: &str,
+    n: i32,
+    y: Nullable<RMatrix<f64>>,
+    coords: Nullable<RMatrix<f64>>,
+    latlong: bool,
+    radius: Nullable<f64>,
+    strict_lt: bool,
+    exclude_zero_distances: bool,
+    cluster_id: Nullable<Integers>,
+    return_matrix: bool,
+    demean_lbmgls: bool,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    if n < 2 {
+        return Err(Error::Other("transform requires n >= 2".into()));
+    }
+    let n_usize = n as usize;
+    let nthreads_usize = parse_r_nthreads(nthreads)?;
+    let tr_kind = match kind {
+        "nn" => SpurTransformKind::Nn {
+            exclude_zero_distances,
+        },
+        "iso" => {
+            let r = match radius {
+                Nullable::NotNull(v) => v,
+                Nullable::Null => return Err(Error::Other("iso transform requires radius".into())),
+            };
+            SpurTransformKind::Iso {
+                radius: r,
+                strict_lt,
+            }
+        }
+        "cluster" => SpurTransformKind::Cluster,
+        "lbmgls" => SpurTransformKind::LbmGls,
+        other => {
+            return Err(Error::Other(format!(
+                "unknown transform kind '{other}' (expected nn, iso, cluster, or lbmgls)"
+            )));
+        }
+    };
+
+    let (coords_rm, d, metric) = match coords {
+        Nullable::Null => (None, 0usize, Metric::Euclidean),
+        Nullable::NotNull(cm) => {
+            if cm.nrows() != n_usize {
+                return Err(Error::Other(format!(
+                    "coords rows {} does not match expected n = {n_usize}",
+                    cm.nrows()
+                )));
+            }
+            let dc = cm.ncols();
+            let met = if latlong {
+                Metric::GreatCircleFractionLonLat
+            } else {
+                Metric::Euclidean
+            };
+            (Some(col_major_to_row_major(cm.data(), n_usize, dc)?), dc, met)
+        }
+    };
+
+    let cluster_vec = parse_r_index_vec(cluster_id, n_usize, "cluster_id", "observations")?;
+    let (y_rm, n_y) = match y {
+        Nullable::Null => (None, 0usize),
+        Nullable::NotNull(ym) => {
+            if ym.nrows() != n_usize || ym.ncols() == 0 {
+                return Err(Error::Other(format!(
+                    "Y dimensions ({} x {}) incompatible with n = {n_usize}",
+                    ym.nrows(),
+                    ym.ncols()
+                )));
+            }
+            let ny = ym.ncols();
+            (Some(col_major_to_row_major(ym.data(), n_usize, ny)?), ny)
+        }
+    };
+
+    let out = run_spur_transform(&SpurTransformRequest {
+        coords: coords_rm.as_deref(),
+        n: n_usize,
+        d,
+        metric,
+        kind: tr_kind,
+        cluster_id: cluster_vec.as_deref(),
+        y: y_rm.as_deref(),
+        n_y,
+        return_matrix,
+        demean_lbmgls,
+        nthreads: nthreads_usize,
+    })
+    .map_err(core_err)?;
+
+    let mat_obj: Robj = match out.matrix {
+        Some(ref m) => row_major_to_rmatrix(m, n_usize, n_usize)?.into(),
+        None => r!(NULL),
+    };
+    let tr_obj: Robj = match out.transformed {
+        Some(ref t) => row_major_to_rmatrix(t, n_usize, n_y)?.into(),
+        None => r!(NULL),
+    };
+    List::from_names_and_values(["matrix", "transformed"], [mat_obj, tr_obj])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_spur_pipeline_r(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: Doubles,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    transform_vars: RMatrix<f64>,
+    demean_lbmgls: bool,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    let nthreads_usize = parse_r_nthreads(nthreads)?;
+    let n = coords.nrows();
+    let d = coords.ncols();
+    let y_slice = y
+        .as_robj()
+        .as_real_slice()
+        .ok_or_else(|| Error::ExpectedReal(y.as_robj().clone()))?;
+    if y_slice.len() != n {
+        return Err(Error::Other(format!(
+            "y length {} does not match coords rows n = {n}",
+            y_slice.len()
+        )));
+    }
+    if x_in.nrows() != n || x_in.ncols() == 0 {
+        return Err(Error::Other(format!(
+            "X_in dimensions ({} x {}) incompatible with n = {n}",
+            x_in.nrows(),
+            x_in.ncols()
+        )));
+    }
+    if transform_vars.nrows() != n || transform_vars.ncols() == 0 {
+        return Err(Error::Other(format!(
+            "transform_vars dimensions ({} x {}) incompatible with n = {n}",
+            transform_vars.nrows(),
+            transform_vars.ncols()
+        )));
+    }
+    let k_x = x_in.ncols();
+    let n_tr = transform_vars.ncols();
+    let q = emat.nrows();
+    let nrep = emat.ncols();
+    let metric = if latlong {
+        Metric::GreatCircleFractionLonLat
+    } else {
+        Metric::Euclidean
+    };
+
+    let coords_rm = col_major_to_row_major(coords.data(), n, d)?;
+    let x_rm = col_major_to_row_major(x_in.data(), n, k_x)?;
+    let emat_rm = col_major_to_row_major(emat.data(), q, nrep)?;
+    let tr_rm = col_major_to_row_major(transform_vars.data(), n, n_tr)?;
+
+    let out = run_spur_pipeline(&SpurPipelineRequest {
+        coords: &coords_rm,
+        n,
+        d,
+        metric,
+        y: y_slice,
+        x_in: &x_rm,
+        k_x,
+        emat: &emat_rm,
+        q,
+        nrep,
+        transform_vars: &tr_rm,
+        n_transform_vars: n_tr,
+        demean_lbmgls,
+        nthreads: nthreads_usize,
+    })
+    .map_err(core_err)?;
+
+    let tr_mat = row_major_to_rmatrix(&out.transformed_vars, n, n_tr)?;
+    List::from_names_and_values(
+        ["i0", "i1", "i0resid", "i1resid", "transformed_vars"],
+        [
+            Robj::from(build_r_spur_i0_list(out.i0, 1)?),
+            Robj::from(build_r_spur_i1_list(out.i1)?),
+            Robj::from(build_r_spur_i0_list(out.i0resid, 1)?),
+            Robj::from(build_r_spur_i1_list(out.i1resid)?),
+            Robj::from(tr_mat),
+        ],
+    )
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+pub fn rust_run_spur_i0(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_i0_r(coords, latlong, y, emat, nthreads)
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+pub fn rust_run_spur_i1(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_i1_r(coords, latlong, y, emat, nthreads)
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+pub fn rust_run_spur_i0_resid(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_i0_resid_r(coords, latlong, y, x_in, emat, nthreads)
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+pub fn rust_run_spur_i1_resid(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: RMatrix<f64>,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_i1_resid_r(coords, latlong, y, x_in, emat, nthreads)
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+pub fn rust_run_spur_halflife(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: Doubles,
+    emat: RMatrix<f64>,
+    level: f64,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_halflife_r(coords, latlong, y, emat, level, nthreads)
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+pub fn rust_run_spur_transform(
+    kind: &str,
+    n: i32,
+    y: Nullable<RMatrix<f64>>,
+    coords: Nullable<RMatrix<f64>>,
+    latlong: bool,
+    radius: Nullable<f64>,
+    strict_lt: bool,
+    exclude_zero_distances: bool,
+    cluster_id: Nullable<Integers>,
+    return_matrix: bool,
+    demean_lbmgls: bool,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_transform_r(
+        kind,
+        n,
+        y,
+        coords,
+        latlong,
+        radius,
+        strict_lt,
+        exclude_zero_distances,
+        cluster_id,
+        return_matrix,
+        demean_lbmgls,
+        nthreads,
+    )
+}
+
+#[cfg(feature = "exports")]
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+pub fn rust_run_spur_pipeline(
+    coords: RMatrix<f64>,
+    latlong: bool,
+    y: Doubles,
+    x_in: RMatrix<f64>,
+    emat: RMatrix<f64>,
+    transform_vars: RMatrix<f64>,
+    demean_lbmgls: bool,
+    nthreads: Nullable<i32>,
+) -> extendr_api::Result<List> {
+    run_spur_pipeline_r(
+        coords,
+        latlong,
+        y,
+        x_in,
+        emat,
+        transform_vars,
+        demean_lbmgls,
+        nthreads,
+    )
+}
+
 #[cfg(feature = "exports")]
 extendr_module! {
     mod spatial_r;
@@ -626,6 +1210,13 @@ extendr_module! {
     fn rust_run_exact_scpc_clustered;
     fn rust_run_exact_scpc_full;
     fn rust_run_approx_scpc;
+    fn rust_run_spur_i0;
+    fn rust_run_spur_i1;
+    fn rust_run_spur_i0_resid;
+    fn rust_run_spur_i1_resid;
+    fn rust_run_spur_halflife;
+    fn rust_run_spur_transform;
+    fn rust_run_spur_pipeline;
 }
 
 #[cfg(test)]

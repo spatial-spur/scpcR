@@ -10,12 +10,19 @@ pub mod linalg;
 pub mod nystrom;
 mod quadrature;
 pub mod scpc_op;
+pub mod spur_op;
 mod student_t;
 pub mod threads;
 
 pub use distance::Metric;
 pub use scpc_op::{
     run_approx_scpc, run_exact_scpc, ApproxScpcRequest, ExactScpcOutput, ExactScpcRequest,
+};
+pub use spur_op::{
+    run_spur_halflife, run_spur_i0, run_spur_i0_resid, run_spur_i1, run_spur_i1_resid,
+    run_spur_pipeline, run_spur_transform, SpurGeometry, SpurHalfLifeOutput, SpurHalfLifeRequest,
+    SpurI0Output, SpurI1Output, SpurPipelineOutput, SpurPipelineRequest, SpurTestRequest,
+    SpurTransformKind, SpurTransformOutput, SpurTransformRequest,
 };
 
 use std::fmt;

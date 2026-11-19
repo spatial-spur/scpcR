@@ -70,9 +70,13 @@
 #'     approximation branch.}
 #'   \item{\code{call}}{The matched call.}
 #'   \item{\code{backend}}{Backend used: \code{"rust"} or \code{"fallback"}.}
+#'   \item{\code{fallback_reason}}{Reason for selecting the fallback, if used.}
 #'   \item{\code{tied}}{Logical; \code{TRUE} when leading spatial eigenvalues
 #'     are numerically tied.}
 #' }
+#' @details Weighted regression fits are unsupported. An indefinite sampled
+#'   covariance causes approximate SCPC to report an error. Use exact SCPC
+#'   when the sample size permits.
 #'
 #' @references
 #' Mueller, U. K. and Watson, M. W. (2022).
@@ -159,6 +163,11 @@ scpc <- function(model,
     stop("`cluster` must be a single non-empty column name.")
   }
 
+  # The conditional benchmark is defined for unweighted fits.
+  if (.has_regression_weights(model)) {
+    stop("SCPC does not support models fitted with regression weights.", call. = FALSE)
+  }
+
   ## 1. Influence functions --------------------------------------------------
   S <- sandwich::estfun(model)
   coef_vec <- stats::coef(model)
@@ -233,6 +242,7 @@ scpc <- function(model,
       stop("Cluster variable not found in data: ", cluster)
     }
     cl_vec <- factor(data[[cluster]][obs_index])
+    if (anyNA(cl_vec)) stop("Cluster IDs must be present for every observation in the estimation sample.")
 
     ## Coordinates must be constant within clusters.
     coord_by_cl <- rowsum(coords, cl_vec)
@@ -259,7 +269,6 @@ scpc <- function(model,
   coef_names <- raw_coef_names[seq_len(k_use)]
 
   ## 3. Native Rust dispatch (exact unweighted OLS, IV, and 1-way FE)
-  is_unweighted <- is.null(stats::weights(model)) && is.null(model$weights)
   fe_is_multiway <- !isTRUE(uncond) &&
     !is.null(cond_fixef_id) &&
     (length(model$fixef_vars) != 1L || !is.null(model$fixef_terms))
@@ -285,7 +294,6 @@ scpc <- function(model,
     !fe_is_multiway &&
     !inherits(model, "glm") &&
     (inherits(model, "lm") || inherits(model, "fixest")) &&
-    is_unweighted &&
     k_use >= 1L
   rust_sym <- if (identical(method_actual, "approx")) {
     "wrap__rust_run_approx_scpc"
@@ -310,6 +318,14 @@ scpc <- function(model,
     }
   }
 
+  fallback_reason <- if (identical(backend_resolved, "fallback")) {
+    "requested"
+  } else if (!rust_loaded) {
+    "native_unavailable"
+  } else {
+    "unsupported_model"
+  }
+  native_tied <- FALSE
   if (!identical(backend_resolved, "fallback") && rust_eligible && rust_loaded) {
     nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
     rust_tied_fallback <- FALSE
@@ -338,13 +354,15 @@ scpc <- function(model,
       error = function(e) {
         if (identical(method_actual, "approx") &&
             identical(backend_resolved, "auto") &&
-            grepl("tied eigenspace", conditionMessage(e), fixed = TRUE)) {
+            inherits(e, "spatial_tied_eigenspace")) {
           rust_tied_fallback <<- TRUE
           return(NULL)
         }
         stop(e)
       }
     )
+    native_tied <- rust_tied_fallback || isTRUE(rust_res$tied)
+    if (native_tied) fallback_reason <- "tied_eigenspace"
     if (!isTRUE(rust_tied_fallback) && !is.null(rust_res) &&
         (!isTRUE(rust_res$tied) || identical(backend_resolved, "rust"))) {
       out <- rust_res$scpcstats
@@ -369,6 +387,7 @@ scpc <- function(model,
         large_n_seed = large_n_seed,
         call = match.call(),
         backend = "rust",
+        fallback_reason = NULL,
         tied = isTRUE(rust_res$tied)
       ), class = "scpc"))
     }
@@ -468,7 +487,7 @@ scpc <- function(model,
           residualize <- iv_residualizer
           xj <- xj_raw
         }
-        xjs <- sign(xj)
+        xjs <- .scpc_score_sign(xj)
         Rx <- sweep(Wfin[, -1, drop = FALSE], 1, xj, `*`)
         pre_max <- if (ncol(Wfin) > 1L) max(sqrt(colSums(Rx^2))) else 0
         Wx <- .orthogonalize_W_iv(
@@ -488,7 +507,7 @@ scpc <- function(model,
         } else {
           cond_fixef_id_j <- cond_fixef_id
         }
-        xjs <- sign(xj)
+        xjs <- .scpc_score_sign(xj)
         Rx <- sweep(Wfin[, -1, drop = FALSE], 1, xj, `*`)
         pre_max <- if (ncol(Wfin) > 1L) max(sqrt(colSums(Rx^2))) else 0
         Wx <- .orthogonalize_W(
@@ -567,7 +586,8 @@ scpc <- function(model,
     large_n_seed = large_n_seed,
     call = match.call(),
     backend = "fallback",
-    tied = isTRUE(spc$tied)
+    tied = native_tied || isTRUE(spc$tied),
+    fallback_reason = fallback_reason
   ), class = "scpc")
 }
 
@@ -667,7 +687,7 @@ scpc <- function(model,
     return(matrix(0, nrow = nrow(X), ncol = 0L))
   }
 
-  qrX <- qr(X, tol = tol)
+  qrX <- qr(.scale_design_columns(X), tol = tol)
   if (qrX$rank < ncol(X)) {
     stop("OLS residualizer is rank deficient.", call. = FALSE)
   }
@@ -681,33 +701,6 @@ scpc <- function(model,
   }
   storage.mode(Q_x) <- "double"
   Q_x
-}
-
-.build_iv_projector <- function(X_iv, Z_iv, fixef_id = NULL, tol = 1e-10) {
-  X <- .coerce_numeric_matrix(X_iv, "IV residualizer X")$mat
-  Z <- .coerce_numeric_matrix(Z_iv, "IV residualizer Z")$mat
-  if (nrow(X) != nrow(Z)) {
-    stop("IV residualizer requires X and Z to have the same number of rows.", call. = FALSE)
-  }
-  X <- .demean_for_scpc(X, fixef_id, "IV residualizer X")
-  Z <- .demean_for_scpc(Z, fixef_id, "IV residualizer Z")
-
-  qrZ <- qr(Z, tol = tol)
-  PzX <- .project_qr(qrZ, X)
-  A <- crossprod(X, PzX)
-  qrA <- qr(A, tol = tol)
-  if (qrA$rank < ncol(A)) {
-    stop("IV residualizer is rank deficient: X'P_ZX is not full rank.", call. = FALSE)
-  }
-
-  V_t <- matrix(qr.coef(qrA, t(PzX)), nrow = ncol(X), ncol = nrow(X))
-  if (anyNA(V_t) || any(!is.finite(V_t))) {
-    stop("IV residualizer produced non-finite projector factors.", call. = FALSE)
-  }
-  V <- t(V_t)
-  storage.mode(X) <- "double"
-  storage.mode(V) <- "double"
-  list(U = X, V = V)
 }
 
 .run_scpc_rust_m1 <- function(coords,
@@ -757,7 +750,7 @@ scpc <- function(model,
     xj_mat <- n * (model_mat_cond %*% t(bread_sub))
     storage.mode(xj_mat) <- "double"
     if (is.null(cl_drop)) {
-      xjs_mat <- sign(xj_mat)
+      xjs_mat <- .scpc_score_sign(xj_mat)
     } else {
       cl_sq <- as.matrix(rowsum(xj_mat^2, cl_drop))
       cl_norm <- sqrt(cl_sq)[as.integer(cl_drop), , drop = FALSE]
@@ -895,6 +888,7 @@ scpc <- function(model,
   }
 
   if (inherits(res, "extendr_error")) {
+    if (inherits(res$value, "condition")) stop(res$value)
     stop(res$value, call. = FALSE)
   }
   res

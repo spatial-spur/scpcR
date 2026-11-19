@@ -131,7 +131,7 @@ pub fn rust_run_approx_scpc(
     landmarks: i32,
     samples: i32,
     pair_count: i32,
-) -> extendr_api::Result<List> {
+) -> std::result::Result<List, spatial_r::ApproxScpcError> {
     spatial_r::run_approx_scpc_r_impl(
         coords,
         latlong,

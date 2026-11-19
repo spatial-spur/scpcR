@@ -97,3 +97,35 @@ test_that("make_iv_residualizer errors when X'P_ZX is rank deficient", {
     "rank deficient"
   )
 })
+
+test_that("IV projection uses the same identifying span after rescaling or duplicate instruments", {
+  X <- cbind(1, c(-3, 0, 2, 2, 6))
+  Z <- cbind(1, c(0, 4, 1, 2, 7), c(1, 0, 5, 4, 0))
+  Q <- qr.Q(qr(Z))
+  X_hat <- Q %*% crossprod(Q, X)
+  expected <- diag(5) - t(X %*% solve(crossprod(X_hat), t(X_hat)))
+  U <- sweep(X, 2L, c(1e130, 1e-130), "*")
+  V <- sweep(cbind(Z, Z[, 3]), 2L, c(1e-70, 1e95, 1e-110, 1e95), "*")
+  expect_equal(.make_iv_residualizer(U, V, transpose = TRUE)(diag(5)), expected)
+})
+
+test_that("FE projection preserves small within-group variation and drops absorbed instruments", {
+  fe <- list(group = rep(1:4, each = 3))
+  x <- cbind(rep(c(-2, -1, 3), 4))
+  z <- cbind(rep(c(-1, -1, 2), 4))
+  y <- sin(seq_len(nrow(x)))
+  absorbed <- cbind(2^40 * fe$group)
+
+  ordinary <- .make_iv_residualizer(x, z, fixef_id = fe, transpose = TRUE)
+  offset_units <- .make_iv_residualizer(
+    (x + absorbed) * 2^100, cbind((z + absorbed) * 2^-100, absorbed),
+    fixef_id = fe, transpose = TRUE
+  )
+  expect_equal(offset_units(y), ordinary(y), tolerance = 1e-10)
+  expect_error(.make_iv_residualizer(x, absorbed, fixef_id = fe), "rank deficient")
+
+  ols <- .make_ols_residualizer(x, fixef_id = fe)
+  ols_scaled <- .make_ols_residualizer((x + absorbed) * 2^100, fixef_id = fe)
+  expect_equal(ols_scaled(y), ols(y), tolerance = 1e-10)
+  expect_error(.make_ols_residualizer(absorbed, fixef_id = fe), "rank deficient")
+})

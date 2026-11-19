@@ -35,3 +35,14 @@ test_that("scpc validates scalar option inputs", {
     "`cluster` must be a single non-empty column name"
   )
 })
+test_that("GLM prior and working weights are distinguished", {
+  d <- data.frame(y = c(1, 3, 2, 6, 8), x = 1:5, w = c(1, 2, 1, 1, 2))
+
+  expect_false(.has_regression_weights(stats::glm(y ~ x, data = d, weights = NULL)))
+  expect_false(.has_regression_weights(stats::glm(y ~ x, data = d, family = stats::poisson())))
+  expect_true(.has_regression_weights(stats::glm(y ~ x, data = d, weights = w)))
+  expect_true(.has_regression_weights(stats::glm(y ~ x, data = d, weights = rep(1, 5))))
+  grouped <- stats::glm(cbind(y, 9 - y) ~ x, data = d, family = stats::binomial())
+  expect_true(.has_regression_weights(grouped))
+  expect_error(scpc(grouped, data = d, coords_euclidean = "x"), "regression weights")
+})

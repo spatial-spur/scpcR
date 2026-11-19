@@ -2,6 +2,20 @@
 # Data and model helpers
 # ---------------------------------------------------------------------------
 
+.has_regression_weights <- function(model) {
+  if (!inherits(model, "glm")) {
+    return(!is.null(stats::weights(model)) || !is.null(model[["weights"]]))
+  }
+  # A GLM's working weights belong to the IRLS fit. Inspect its prior
+  # weights and retained model frame to detect regression-supplied weights.
+  frame <- model[["model"]]
+  if (!is.null(stats::model.weights(frame)) ||
+      any(stats::weights(model, type = "prior") != 1)) {
+    return(TRUE)
+  }
+  is.null(frame) && !is.null(model[["call"]][["weights"]])
+}
+
 .get_obs_index <- function(model, data) {
   if (inherits(model, "fixest")) {
     if (!requireNamespace("fixest", quietly = TRUE)) {
@@ -237,13 +251,7 @@
     stop("Internal error: fixest conditional regressors have incompatible row count.")
   }
 
-  mm <- tryCatch(
-    as.matrix(fixest::demean(mm, f = model$fixef_id, nthreads = 1L)),
-    error = function(e) e
-  )
-  if (inherits(mm, "error")) {
-    stop("Could not FE-demean conditional regressors for fixest model: ", conditionMessage(mm))
-  }
+  mm <- .demean_for_scpc(mm, model$fixef_id, "fixest conditional regressors")
   list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
 }
 

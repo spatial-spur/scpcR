@@ -23,7 +23,17 @@
     names(S) <- c("lon", "lat")
     D <- geodist::geodist(S, measure = "haversine") / (2 * pi * 6378137)
   } else {
-    D <- as.matrix(stats::dist(S, diag = TRUE, upper = TRUE))
+    distances <- stats::dist(S)
+    D <- as.matrix(distances)
+    if (!all(is.finite(distances) & distances >= 1e-150)) {
+      for (i in seq_len(nrow(S) - 1L)) {
+        j <- (i + 1L):nrow(S)
+        j <- j[!is.finite(D[i, j]) | D[i, j] < 1e-150]
+        if (!length(j)) next
+        base <- S[rep(i, length(j)), , drop = FALSE]
+        D[i, j] <- D[j, i] <- .getdistvec(S[j, , drop = FALSE], base, latlong = FALSE)
+      }
+    }
   }
   D
 }
@@ -45,7 +55,17 @@
     a <- sin(dlat)^2 + cos(lat1) * cos(lat2) * sin(dlon)^2
     asin(sqrt(pmin(pmax(a, 0), 1))) / pi
   } else {
-    sqrt(rowSums((S1 - S2)^2))
+    delta <- S1 - S2
+    d <- sqrt(rowSums(delta^2))
+    fix <- !is.finite(d) | d < 1e-150
+    if (any(fix)) {
+      small <- delta[fix, , drop = FALSE]
+      scale <- apply(abs(small), 1L, max)
+      if (any(!is.finite(scale))) stop("Pairwise distance exceeds the floating-point range.")
+      d[fix] <- scale * sqrt(rowSums((small / ifelse(scale > 0, scale, 1))^2))
+      if (any(!is.finite(d))) stop("Pairwise distance exceeds the floating-point range.")
+    }
+    d
   }
 }
 
@@ -500,6 +520,18 @@
   list(indices = as.integer(v), state = random_t)
 }
 
+.check_sampled_covariance <- function(omega) {
+  rel_tol <- 32 * nrow(omega) * .Machine$double.eps
+  scale <- max(abs(omega))
+  if (!is.finite(scale) ||
+      (scale > 0 && min(eigen(omega / scale, symmetric = TRUE, only.values = TRUE)$values) < -rel_tol)) {
+    stop(errorCondition(
+      'Invalid sampled covariance in approximate SCPC. Use method = "exact" if feasible.',
+      class = "spatial_invalid_sampled_covariance"
+    ))
+  }
+}
+
 .lnget_Oms <- function(S, c0, cmax, W, cgridfac,
                        capM = 1000000L, random_t = 1, latlong = FALSE) {
   nc <- .getnc(c0, cmax, cgridfac)
@@ -523,6 +555,7 @@
     Oms[[i]] <- gram +
       0.5 * (n * (n - 1) / capM) *
       (crossprod(W1, W2 * cd) + crossprod(W2, W1 * cd))
+    .check_sampled_covariance(Oms[[i]])
     c <- c * cgridfac
   }
 

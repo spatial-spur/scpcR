@@ -1,5 +1,6 @@
 find_stata_binary <- function() {
   candidates <- c(
+    Sys.getenv("SCPC_STATA_BIN", unset = ""),
     Sys.which("stata-se"),
     Sys.which("stata-mp"),
     Sys.which("stata"),
@@ -14,6 +15,11 @@ find_stata_binary <- function() {
 }
 
 run_stata_do <- function(stata_bin, lines) {
+  ado_dir <- Sys.getenv("SCPC_STATA_ADOPATH", unset = "")
+  if (nzchar(ado_dir)) {
+    ado_dir <- normalizePath(ado_dir, winslash = "/", mustWork = TRUE)
+    lines <- c(sprintf('adopath ++ "%s"', ado_dir), lines)
+  }
   do_file <- tempfile("scpc_parity_", fileext = ".do")
   base <- tools::file_path_sans_ext(basename(do_file))
   log_candidates <- c(

@@ -121,20 +121,6 @@ parse_json_minimal <- function(text) {
   parse_value()
 }
 
-find_spur_file <- function(rel_path) {
-  candidates <- c(
-    normalizePath(file.path("..", "..", "..", rel_path), mustWork = FALSE),
-    normalizePath(file.path("..", "..", rel_path), mustWork = FALSE),
-    normalizePath(file.path(getwd(), rel_path), mustWork = FALSE),
-    normalizePath(file.path("/Users/pauldavidboll/Github/spatial-spur", rel_path), mustWork = FALSE)
-  )
-  hits <- candidates[file.exists(candidates)]
-  if (length(hits) == 0L) {
-    return(NA_character_)
-  }
-  hits[[1L]]
-}
-
 json_rows_to_matrix <- function(rows) {
   do.call(rbind, lapply(rows, as.numeric))
 }
@@ -214,13 +200,9 @@ assert_scpc_matches_fixture <- function(out, fixture, uncond, tol = 1e-10, cal_r
 }
 
 test_that("Rust and fallback agree and preserve the stable Milestone 1 results", {
-  fixture_path <- find_spur_file("spatial-rust/fixtures/m1_exact_scpc.json")
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  bench_1000_path <- find_spur_file("verification/data/bench_1000.csv")
-  skip_if(
-    is.na(fixture_path) || is.na(bench_200_path) || is.na(bench_1000_path),
-    "spatial-rust fixture or verification CSV files not available"
-  )
+  fixture_path <- testthat::test_path("fixtures", "m1_exact_scpc.json")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
+  bench_1000_path <- testthat::test_path("fixtures", "bench_1000.csv")
 
   fixtures <- parse_json_minimal(paste(readLines(fixture_path, warn = FALSE), collapse = "\n"))$r
   d200 <- utils::read.csv(bench_200_path)
@@ -313,8 +295,7 @@ test_that("Rust and fallback agree and preserve the stable Milestone 1 results",
 
 test_that("nthreads = 1 runs Rust on 1 thread and matches multi-threaded and fallback", {
   skip_if_not(is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
   fit200 <- stats::lm(y ~ x1 + x2, data = d200)
@@ -529,8 +510,7 @@ test_that("no-intercept OLS, 1D Euclidean coords, and tied grids behave as expec
 })
 
 test_that("scale-invariant calibration and co-location floor match defining oracle", {
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d30 <- utils::read.csv(bench_200_path)[seq_len(30L), , drop = FALSE]
   fit30 <- stats::lm(y ~ x1 + x2, data = d30)
@@ -706,8 +686,7 @@ test_that("small-unit regressor rank and positive outcome rescaling preserve inf
   }
 
   # Positive outcome rescaling: q, t, P>|t|, cv invariant; Coef, SE, CI proportional
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
   d50 <- utils::read.csv(bench_200_path)[seq_len(50L), , drop = FALSE]
   fit_orig <- stats::lm(y ~ x1 + x2, data = d50)
   fit_tiny <- stats::lm(I(y * 1e-12) ~ x1 + x2, data = d50)
@@ -738,8 +717,7 @@ test_that("nthreads = 1 stays fork-safe in parallel::mcparallel after warming th
   skip_on_os("windows")
   skip_if_not_installed("parallel")
 
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
   d60 <- utils::read.csv(bench_200_path)[seq_len(60L), , drop = FALSE]
   fit60 <- stats::lm(y ~ x1 + x2, data = d60)
 
@@ -791,19 +769,13 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
   fit_glm <- stats::glm(y ~ x, data = dat)
 
   for (uncond_flag in c(TRUE, FALSE)) {
-    out_w_auto <- scpc(
-      fit_weighted, dat,
-      coords_euclidean = c("lon", "lat"),
-      avc = 0.1, uncond = uncond_flag, backend = "auto"
-    )
-    expect_identical(out_w_auto$backend, "fallback")
-    expect_error(
-      scpc(
-        fit_weighted, dat,
-        coords_euclidean = c("lon", "lat"),
-        avc = 0.1, uncond = uncond_flag, backend = "rust"
+    for (backend in c("auto", "fallback", "rust")) {
+      expect_error(
+        scpc(fit_weighted, dat, coords_euclidean = c("lon", "lat"),
+             avc = 0.1, uncond = uncond_flag, backend = backend),
+        "regression weights"
       )
-    )
+    }
 
     out_glm_auto <- scpc(
       fit_glm, dat,
@@ -913,8 +885,7 @@ test_that("forced fallback and ineligible auto calls ignore invalid ambient thre
 
 test_that("clustered exact OLS matches fallback across bench_200 and factor/string clusters", {
   skip_if_not(is.loaded("wrap__rust_run_exact_scpc_clustered", PACKAGE = "scpcR"), "native Rust library not loaded")
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
   d200$cl_str <- paste0("cl_", sprintf("%03d", d200$cluster_id))
@@ -1012,8 +983,7 @@ test_that("IV and 1-way absorbed FE Rust paths match fallback across unclustered
 
 test_that("Nystrom approx SCPC matches fallback on bench_200 OLS and IV/FE/clustered fits", {
   skip_if_not(is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
-  bench_200_path <- find_spur_file("verification/data/bench_200.csv")
-  skip_if(is.na(bench_200_path), "bench_200.csv not available")
+  bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
   fit_lm <- stats::lm(y ~ x1 + x2, data = d200)
@@ -1145,4 +1115,21 @@ test_that("method overrides 4500 threshold and approx tied eigenspace falls back
   out_tie_auto <- scpc(fit_tie, d_tie, coords_euclidean = c("s1", "s2"), avc = 0.5, method = "approx", backend = "auto")
   expect_identical(out_tie_auto$backend, "fallback")
   expect_identical(out_tie_auto$method, "approx")
+})
+
+test_that("invalid approximate covariance has its own error across available backends", {
+  i <- 0:7
+  d <- data.frame(x = cos(i), y = sin(2 * i), s1 = i, s2 = sin(i))
+  fit <- lm(y ~ x, d)
+  backends <- "fallback"
+  if (is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR")) {
+    backends <- c(backends, "rust", "auto")
+  }
+  for (backend in backends) {
+    expect_error(
+      scpc(fit, d, coords_euclidean = c("s1", "s2"), avc = 0.95,
+           uncond = TRUE, method = "approx", backend = backend, large_n_seed = 1),
+      class = "spatial_invalid_sampled_covariance"
+    )
+  }
 })

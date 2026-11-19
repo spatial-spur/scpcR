@@ -124,11 +124,19 @@ An object of class \code{"scpc"} with components:
     approximation branch.}
   \item{\code{call}}{The matched call.}
   \item{\code{backend}}{Backend used: \code{"rust"} or \code{"fallback"}.}
+  \item{\code{fallback_reason}}{Reason for selecting the fallback, if used.}
+  \item{\code{tied}}{Logical; \code{TRUE} when leading spatial eigenvalues
+    are numerically tied.}
 }
 }
 \description{
 Compute spatial correlation-robust inference for regression coefficients
 using the SCPC method of Mueller and Watson (2022, 2023).
+}
+\details{
+Weighted regression fits are unsupported. An indefinite sampled
+  covariance causes approximate SCPC to report an error. Use exact SCPC
+  when the sample size permits.
 }
 \examples{
 set.seed(42)

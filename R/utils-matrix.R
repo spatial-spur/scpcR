@@ -53,8 +53,21 @@
 # ---------------------------------------------------------------------------
 # Residualisation helpers
 # ---------------------------------------------------------------------------
-.project_qr <- function(qr_obj, A) {
-  qr.fitted(qr_obj, as.matrix(A))
+.scale_design_columns <- function(X) {
+  if (ncol(X) == 0L) return(X)
+  sweep(X, 2L, .design_column_scales(X), "/")
+}
+
+.design_column_scales <- function(X) {
+  scales <- apply(abs(X), 2L, max)
+  scales[scales == 0] <- 1
+  scales
+}
+
+.scpc_score_sign <- function(x) {
+  out <- sign(x)
+  out[out == 0] <- 1
+  out
 }
 
 .coerce_numeric_matrix <- function(A, arg) {
@@ -72,17 +85,23 @@
   list(mat = A, vec_input = vec_input)
 }
 
-.demean_for_scpc <- function(A, fixef_id, arg) {
+.demean_for_scpc <- function(A, fixef_id, arg, restore_scale = TRUE) {
   A <- as.matrix(A)
-  if (is.null(fixef_id)) {
+  if (is.null(fixef_id) || ncol(A) == 0L) {
     return(A)
   }
   if (!requireNamespace("fixest", quietly = TRUE)) {
     stop("Package 'fixest' is required for fixed-effect demeaning.")
   }
 
+  # A fixed-effect shift leaves the within residual unchanged and keeps small
+  # within-group differences from being rounded away during column scaling.
+  group <- if (is.list(fixef_id)) fixef_id[[1L]] else as.matrix(fixef_id)[, 1L]
+  shifted <- A - A[match(group, group), , drop = FALSE]
+  if (all(is.finite(shifted))) A <- shifted
+  scales <- .design_column_scales(A)
   out <- tryCatch(
-    fixest::demean(A, f = fixef_id, nthreads = 1L),
+    fixest::demean(sweep(A, 2L, scales, "/"), f = fixef_id, nthreads = 1L, tol = 1e-12),
     error = function(e) e
   )
   if (inherits(out, "error")) {
@@ -94,7 +113,17 @@
     stop(arg, " changed dimensions during fixed-effect demeaning.")
   }
 
-  out
+  if (restore_scale) sweep(out, 2L, scales, "*") else out
+}
+
+.projection_design <- function(X, fixef_id, arg) {
+  if (is.null(fixef_id) || ncol(X) == 0L) return(.scale_design_columns(X))
+  X <- .demean_for_scpc(X, fixef_id, arg, restore_scale = FALSE)
+  # An absorbed column can retain demeaning roundoff. Discard it before the
+  # second scaling so the remnant cannot become a usable design direction.
+  absorbed <- apply(abs(X), 2L, max) <= 1e-12
+  X[, absorbed] <- 0
+  .scale_design_columns(X)
 }
 
 .restore_residualizer_shape <- function(A, vec_input) {
@@ -111,7 +140,7 @@
     X <- cbind("(Intercept)" = 1, X)
   }
 
-  X <- .demean_for_scpc(X, fixef_id, "OLS residualizer X")
+  X <- .projection_design(X, fixef_id, "OLS residualizer X")
   qrX <- qr(X, tol = tol)
   if (qrX$rank < ncol(X)) {
     stop("OLS residualizer is rank deficient.")
@@ -132,35 +161,39 @@
   }
 }
 
-.make_iv_residualizer <- function(X, Z, fixef_id = NULL, tol = 1e-10, transpose = FALSE) {
+.build_iv_projector <- function(X, Z, fixef_id = NULL, tol = 1e-10) {
   X <- .coerce_numeric_matrix(X, "IV residualizer X")$mat
   Z <- .coerce_numeric_matrix(Z, "IV residualizer Z")$mat
-
   if (nrow(X) != nrow(Z)) {
     stop("IV residualizer requires X and Z to have the same number of rows.")
   }
 
-  X <- .demean_for_scpc(X, fixef_id, "IV residualizer X")
-  Z <- .demean_for_scpc(Z, fixef_id, "IV residualizer Z")
-
+  X <- .projection_design(X, fixef_id, "IV residualizer X")
+  Z <- .projection_design(Z, fixef_id, "IV residualizer Z")
   qrZ <- qr(Z, tol = tol)
-  PzX <- .project_qr(qrZ, X)
-  A <- crossprod(X, PzX)
-  qrA <- qr(A, tol = tol)
+  p <- ncol(X)
+  if (qrZ$rank < p) stop("IV residualizer is rank deficient: too few independent instruments.")
+  Qz <- qr.Q(qrZ)[, seq_len(qrZ$rank), drop = FALSE]
 
-  if (qrA$rank < ncol(A)) {
-    stop("IV residualizer is rank deficient: X'P_ZX is not full rank.")
+  # H = X (Q_Z' X)^+ Q_Z'. Use the same scaled decomposition to
+  # check identification and construct the two factors, without normal equations.
+  design <- svd(crossprod(Qz, X), nu = p, nv = p)
+  if (design$d[p] <= tol * design$d[1L] || design$d[1L] == 0) {
+    stop("IV residualizer is rank deficient: projected design is not full rank.")
   }
-  # H_IV = X (X' P_Z X)^-1 X' P_Z. Conditional weight columns
-  # require M_IV', whereas fitted residuals use M_IV.
-  if (isTRUE(transpose)) {
-    qrA <- qr(t(A), tol = tol)
-  }
+  V <- Qz %*% (sweep(design$u, 2L, design$d, "/") %*% t(design$v))
+  list(U = X, V = V)
+}
+
+.make_iv_residualizer <- function(X, Z, fixef_id = NULL, tol = 1e-10, transpose = FALSE) {
+  proj <- .build_iv_projector(X, Z, fixef_id, tol)
+  left <- if (isTRUE(transpose)) proj$V else proj$U
+  right <- if (isTRUE(transpose)) proj$U else proj$V
 
   function(Y) {
     y_in <- .coerce_numeric_matrix(Y, "IV residualizer Y")
     Y <- y_in$mat
-    if (nrow(Y) != nrow(X)) {
+    if (nrow(Y) != nrow(left)) {
       stop("IV residualizer received Y with an incompatible row count.")
     }
     if (ncol(Y) == 0L) {
@@ -168,14 +201,7 @@
     }
 
     Y <- .demean_for_scpc(Y, fixef_id, "IV residualizer Y")
-    rhs <- if (isTRUE(transpose)) crossprod(X, Y) else crossprod(PzX, Y)
-    coef <- qr.coef(qrA, rhs)
-    if (anyNA(coef) || any(!is.finite(coef))) {
-      stop("IV residualizer produced non-finite auxiliary coefficients.")
-    }
-
-    left <- if (isTRUE(transpose)) PzX else X
-    .restore_residualizer_shape(Y - left %*% coef, y_in$vec_input)
+    .restore_residualizer_shape(Y - left %*% crossprod(right, Y), y_in$vec_input)
   }
 }
 

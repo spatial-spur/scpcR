@@ -27,9 +27,9 @@ For a standalone source archive that can build Rust without network access, run
 `bash spatial-rust/scripts/build_r_source.sh scpcR ../r-source`, then install the
 resulting archive with `R CMD INSTALL`.
 
-Set `SPATIAL_SME2=1` when running `R CMD INSTALL` to opt in to SME2.
-OxiBLAS selects the SME2 kernel at runtime for eligible matrix products on
-supported Arm64 macOS and Linux systems.
+OxiBLAS uses SME2 for eligible matrix products on supported Arm64 macOS
+and Linux systems. Set `OXIBLAS_DISABLE_SME2=1` before starting R to
+use the other OxiBLAS kernels.
 
 On Windows install the Rust target matching Rtools and your R installation.
 The build uses `x86_64-pc-windows-gnu` for x86-64 R or

@@ -129,3 +129,46 @@ test_that("FE projection preserves small within-group variation and drops absorb
   expect_equal(ols_scaled(y), ols(y), tolerance = 1e-10)
   expect_error(.make_ols_residualizer(absorbed, fixef_id = fe), "rank deficient")
 })
+
+test_that("IV rank rejects roundoff when no projected column identifies the design", {
+  x <- c(-1, -1, 1, 1, -1, -1, 1, 1)
+  z <- c(-1, 1, -1, 1, -1, 1, -1, 1)
+  x2 <- rep(c(-1, 1), each = 4) * x
+  z2 <- rep(c(-1, 1), each = 4) * z
+  expect_error(.build_iv_projector(x + 1e-14 * z, z), "rank deficient")
+  expect_error(.build_iv_projector(cbind(x + 1e-14 * z, x2 + 1e-14 * z2), cbind(z, z2)),
+               "rank deficient")
+  expect_no_error(.build_iv_projector(x + 1e-8 * z, z))
+})
+
+test_that("FE projection retains within variation at the input spacing", {
+  fe <- list(group = rep(0:2, each = 3))
+  x <- c(0, 1, 2, 0, 2, 1, 1, 0, 2)
+  y <- seq_along(x)^2
+  expected <- .make_ols_residualizer(x, fixef_id = fe)(y)
+  expect_equal(.make_ols_residualizer(x + 2^52, fixef_id = fe)(y), expected,
+               tolerance = 1e-12)
+})
+
+test_that("two-way projection keeps translated variation and rejects absorbed columns", {
+  l <- 80L
+  a <- c(seq_len(l), seq_len(l - 1L), seq_len(l))
+  b <- c(seq_len(l), seq.int(2L, l), seq_len(l))
+  x <- c(rep(c(1, 2), length.out = l), numeric(l - 1L), -rep(c(1, 2), length.out = l))
+  z <- c(rep(c(2, 1), length.out = l), numeric(l - 1L), -rep(c(2, 1), length.out = l))
+  y <- sin(seq_along(x))
+  fe <- list(a, b)
+  translated <- x + 2^40 * b
+
+  expected <- lm.fit(cbind(model.matrix(~ factor(a) + factor(b)), x), y)$residuals
+  expect_equal(.make_ols_residualizer(translated, fixef_id = fe)(y), expected, tolerance = 1e-9)
+  expect_equal(.make_ols_residualizer(translated, fixef_id = rev(fe))(y), expected, tolerance = 1e-9)
+  expect_equal(.make_ols_residualizer(x + 2^42 * (a + b), fixef_id = fe)(y),
+               expected, tolerance = 1e-9)
+  expect_error(.make_ols_residualizer(a + 0.75 * b, fixef_id = fe), "rank deficient")
+  clean <- .make_iv_residualizer(x, z, fixef_id = fe, transpose = TRUE)(y)
+  dirty <- .make_iv_residualizer(
+    translated, cbind(z, a + 0.75 * b), fixef_id = fe, transpose = TRUE
+  )(y)
+  expect_equal(dirty, clean, tolerance = 1e-9)
+})

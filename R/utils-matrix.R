@@ -85,7 +85,7 @@
   list(mat = A, vec_input = vec_input)
 }
 
-.demean_for_scpc <- function(A, fixef_id, arg, restore_scale = TRUE) {
+.demean_for_scpc <- function(A, fixef_id, arg, restore_scale = TRUE, drop_absorbed = FALSE) {
   A <- as.matrix(A)
   if (is.null(fixef_id) || ncol(A) == 0L) {
     return(A)
@@ -94,36 +94,78 @@
     stop("Package 'fixest' is required for fixed-effect demeaning.")
   }
 
-  # A fixed-effect shift leaves the within residual unchanged and keeps small
-  # within-group differences from being rounded away during column scaling.
-  group <- if (is.list(fixef_id)) fixef_id[[1L]] else as.matrix(fixef_id)[, 1L]
-  shifted <- A - A[match(group, group), , drop = FALSE]
-  if (all(is.finite(shifted))) A <- shifted
-  scales <- .design_column_scales(A)
-  out <- tryCatch(
-    fixest::demean(sweep(A, 2L, scales, "/"), f = fixef_id, nthreads = 1L, tol = 1e-12),
-    error = function(e) e
-  )
-  if (inherits(out, "error")) {
-    stop("Could not FE-demean ", arg, ": ", conditionMessage(out))
+  groups <- if (is.list(fixef_id)) fixef_id else as.list(as.data.frame(fixef_id))
+  original_scales <- apply(abs(A), 2L, max)
+  # Every anchor shift is in the FE span. Choose the shift that removes
+  # the largest offset in each column, whichever FE contains the offset.
+  shifted <- A
+  best <- original_scales
+  for (group in groups) {
+    candidate <- A - A[match(group, group), , drop = FALSE]
+    sizes <- apply(abs(candidate), 2L, max)
+    take <- is.finite(sizes) & sizes < best
+    shifted[, take] <- candidate[, take, drop = FALSE]
+    best[take] <- sizes[take]
   }
+  scales <- .design_column_scales(shifted)
+  demean <- function(values) {
+    tryCatch(
+      as.matrix(fixest::demean(values, f = groups, nthreads = 1L, tol = 1e-14)),
+      error = function(e) stop("Could not FE-demean ", arg, ": ", conditionMessage(e))
+    )
+  }
+  out <- demean(sweep(shifted, 2L, scales, "/"))
 
-  out <- as.matrix(out)
   if (nrow(out) != nrow(A) || ncol(out) != ncol(A)) {
     stop(arg, " changed dimensions during fixed-effect demeaning.")
   }
 
+  # Compare with the spacing to the preceding floating-point input, as in
+  # Python. A contrast exactly one spacing wide remains representable.
+  exponent <- floor(log2(pmax(original_scales, .Machine$double.xmin)))
+  power <- 2^pmin(exponent, .Machine$double.max.exp - 1)
+  spacing <- power * .Machine$double.eps
+  lower_binade <- power >= original_scales & power > .Machine$double.xmin
+  spacing[lower_binade] <- spacing[lower_binade] / 2
+  spacing[original_scales == 0] <- 0
+  noise <- spacing / scales
+  size <- apply(abs(out), 2L, max)
+  if (length(groups) > 1L) {
+    group_codes <- lapply(groups, function(group) match(group, unique(group)))
+    counts <- lapply(group_codes, tabulate)
+    needs_refinement <- function() {
+      bad <- rep(FALSE, ncol(out))
+      for (i in seq_along(group_codes)) {
+        means <- rowsum(out, group_codes[[i]], reorder = FALSE) / counts[[i]]
+        bad <- bad | (apply(abs(means), 2L, max) > 1e-11 * size)
+      }
+      bad & size >= noise
+    }
+    # fixest stops on an iteration tolerance. Verify the group moments and
+    # reproject any residual that needs it at its own scale.
+    refine <- needs_refinement()
+    for (step in seq_len(6L)) {
+      if (!any(refine)) break
+      local_scale <- size[refine]
+      out[, refine] <- sweep(
+        demean(sweep(out[, refine, drop = FALSE], 2L, local_scale, "/")), 2L, local_scale, "*"
+      )
+      size[refine] <- apply(abs(out[, refine, drop = FALSE]), 2L, max)
+      refine <- needs_refinement()
+    }
+    if (any(refine)) {
+      stop("Could not FE-demean ", arg, " to the required group-moment tolerance.")
+    }
+  }
+  if (drop_absorbed) out[, size < noise] <- 0
   if (restore_scale) sweep(out, 2L, scales, "*") else out
 }
 
 .projection_design <- function(X, fixef_id, arg) {
   if (is.null(fixef_id) || ncol(X) == 0L) return(.scale_design_columns(X))
-  X <- .demean_for_scpc(X, fixef_id, arg, restore_scale = FALSE)
-  # An absorbed column can retain demeaning roundoff. Discard it before the
-  # second scaling so the remnant cannot become a usable design direction.
-  absorbed <- apply(abs(X), 2L, max) <= 1e-12
-  X[, absorbed] <- 0
-  .scale_design_columns(X)
+  .scale_design_columns(.demean_for_scpc(
+    X, fixef_id, arg, restore_scale = FALSE, drop_absorbed = TRUE
+  ))
 }
 
 .restore_residualizer_shape <- function(A, vec_input) {
@@ -133,14 +175,15 @@
   A
 }
 
-.make_ols_residualizer <- function(X, include_intercept = TRUE, fixef_id = NULL, tol = 1e-10) {
+.make_ols_residualizer <- function(X, include_intercept = TRUE, fixef_id = NULL, tol = 1e-10,
+                                  design_within = FALSE) {
   X <- .coerce_numeric_matrix(X, "OLS residualizer X")$mat
   has_intercept <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
   if (isTRUE(include_intercept) && is.null(fixef_id) && !has_intercept) {
     X <- cbind("(Intercept)" = 1, X)
   }
 
-  X <- .projection_design(X, fixef_id, "OLS residualizer X")
+  X <- .projection_design(X, if (isTRUE(design_within)) NULL else fixef_id, "OLS residualizer X")
   qrX <- qr(X, tol = tol)
   if (qrX$rank < ncol(X)) {
     stop("OLS residualizer is rank deficient.")
@@ -178,7 +221,7 @@
   # H = X (Q_Z' X)^+ Q_Z'. Use the same scaled decomposition to
   # check identification and construct the two factors, without normal equations.
   design <- svd(crossprod(Qz, X), nu = p, nv = p)
-  if (design$d[p] <= tol * design$d[1L] || design$d[1L] == 0) {
+  if (design$d[p] <= tol * max(1, design$d[1L])) {
     stop("IV residualizer is rank deficient: projected design is not full rank.")
   }
   V <- Qz %*% (sweep(design$u, 2L, design$d, "/") %*% t(design$v))
@@ -208,7 +251,8 @@
 # ---------------------------------------------------------------------------
 # Orthogonalisation helper (conditional SCPC)
 # ---------------------------------------------------------------------------
-.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL) {
+.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL,
+                             design_within = FALSE) {
   Wx <- W
   Wx[, 1] <- Wx[, 1] * xj * xjs
 
@@ -216,7 +260,8 @@
     residualize <- .make_ols_residualizer(
       model_mat,
       include_intercept = include_intercept,
-      fixef_id = fixef_id
+      fixef_id = fixef_id,
+      design_within = design_within
     )
     ## Conditional OLS weights are S_x M_V D_x B_q.
     Rx <- sweep(Wx[, -1, drop = FALSE], 1, xj, `*`)
@@ -257,7 +302,8 @@
 # Orthogonalisation helper (conditional SCPC, clustered)
 # ---------------------------------------------------------------------------
 .orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
-                                     include_intercept = TRUE, fixef_id = NULL) {
+                                     include_intercept = TRUE, fixef_id = NULL,
+                                     design_within = FALSE) {
   ## Clustered OLS denominator weights are Xi_s' M_V Xi B_q.
   ##
   ## W:               nclust x (q+1) cluster-level spatial projection matrix
@@ -286,7 +332,8 @@
     residualize <- .make_ols_residualizer(
       model_mat_indiv,
       include_intercept = include_intercept,
-      fixef_id = fixef_id
+      fixef_id = fixef_id,
+      design_within = design_within
     )
     Y <- sweep(W_indiv[, -1, drop = FALSE], 1, xj_indiv, `*`)
     R <- residualize(Y)

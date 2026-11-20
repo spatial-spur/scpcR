@@ -164,7 +164,7 @@ scpc <- function(model,
   }
 
   # The conditional benchmark is defined for unweighted fits.
-  if (.has_regression_weights(model)) {
+  if (.has_regression_weights(model, data)) {
     stop("SCPC does not support models fitted with regression weights.", call. = FALSE)
   }
 
@@ -470,7 +470,8 @@ scpc <- function(model,
           Wx <- .orthogonalize_W_cluster(
             Wfin, cl_vec_scpc, xj_indiv, model_mat_cond,
             include_intercept = cond_include_intercept,
-            fixef_id = cond_fixef_id
+            fixef_id = cond_fixef_id,
+            design_within = TRUE
           )
         }
       } else if (is_fixest_iv) {
@@ -513,7 +514,8 @@ scpc <- function(model,
         Wx <- .orthogonalize_W(
           Wfin, xj, xjs, model_mat_cond_j,
           include_intercept = cond_include_intercept,
-          fixef_id = cond_fixef_id_j
+          fixef_id = cond_fixef_id_j,
+          design_within = TRUE
         )
       }
 

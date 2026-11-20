@@ -2,18 +2,34 @@
 # Data and model helpers
 # ---------------------------------------------------------------------------
 
-.has_regression_weights <- function(model) {
+.has_regression_weights <- function(model, data = NULL) {
   if (!inherits(model, "glm")) {
     return(!is.null(stats::weights(model)) || !is.null(model[["weights"]]))
   }
   # A GLM's working weights belong to the IRLS fit. Inspect its prior
-  # weights and retained model frame to detect regression-supplied weights.
+  # weights on the fitted sample and any explicitly retained model weights.
   frame <- model[["model"]]
-  if (!is.null(stats::model.weights(frame)) ||
-      any(stats::weights(model, type = "prior") != 1)) {
-    return(TRUE)
+  if (any(model[["prior.weights"]] != 1, na.rm = TRUE)) return(TRUE)
+  if (!is.null(frame)) return(!is.null(stats::model.weights(frame)))
+
+  arg <- model[["call"]][["weights"]]
+  if (is.null(arg)) return(FALSE)
+  if (is.symbol(arg)) {
+    # With model = FALSE, recover a named NULL without re-evaluating an
+    # arbitrary expression. A data column takes precedence over the formula
+    # environment, just as in glm().
+    env <- environment(stats::formula(model))
+    data_arg <- model[["call"]][["data"]]
+    if (is.null(data) && is.symbol(data_arg)) {
+      data <- get0(as.character(data_arg), envir = env, inherits = TRUE)
+    }
+    name <- as.character(arg)
+    if ((is.list(data) || is.null(data_arg)) && !name %in% names(data)) {
+      value <- get0(name, envir = env, inherits = TRUE, ifnotfound = FALSE)
+      if (is.null(value)) return(FALSE)
+    }
   }
-  is.null(frame) && !is.null(model[["call"]][["weights"]])
+  TRUE
 }
 
 .get_obs_index <- function(model, data) {
@@ -251,7 +267,7 @@
     stop("Internal error: fixest conditional regressors have incompatible row count.")
   }
 
-  mm <- .demean_for_scpc(mm, model$fixef_id, "fixest conditional regressors")
+  mm <- .demean_for_scpc(mm, model$fixef_id, "fixest conditional regressors", drop_absorbed = TRUE)
   list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
 }
 

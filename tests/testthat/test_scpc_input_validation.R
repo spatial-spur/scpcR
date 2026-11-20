@@ -46,3 +46,15 @@ test_that("GLM prior and working weights are distinguished", {
   expect_true(.has_regression_weights(grouped))
   expect_error(scpc(grouped, data = d, coords_euclidean = "x"), "regression weights")
 })
+
+test_that("GLM weight detection uses only fitted prior weights and accepts a named NULL", {
+  d <- data.frame(y = c(1, 3, 2, NA, 4), x = 1:5, w = 1)
+  w <- NULL
+  w_null <- NULL
+  excluded <- stats::glm(y ~ x, data = d, na.action = stats::na.exclude)
+  expect_false(.has_regression_weights(excluded))
+  no_frame <- stats::glm(y ~ x, data = d, weights = w_null, model = FALSE)
+  expect_false(.has_regression_weights(no_frame, d))
+  with_column <- stats::glm(y ~ x, data = d, weights = w, model = FALSE)
+  expect_true(.has_regression_weights(with_column, d))
+})

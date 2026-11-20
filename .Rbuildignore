@@ -11,7 +11,9 @@
 ^scpcR_.*\.tar\.gz$
 ^\.claude$
 ^\.github$
-^docs/\.pages$
+^docs$
+^assets$
+^CITATION\.(bib|cff)$
 ^src/.*\.o$
 ^src/.*\.so$
 ^src/.*\.dll$

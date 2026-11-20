@@ -18,6 +18,7 @@ LazyData: true
 RoxygenNote: 7.3.2
 SystemRequirements: GNU make, Cargo (Rust's package manager), rustc (optional, for Rust acceleration)
 Imports:
+    stats,
     fixest (>= 0.14.0),
     gaussquad,
     sandwich

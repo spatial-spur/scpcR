@@ -130,7 +130,7 @@ test_that("conditional OLS cutoffs match the fitted design with and without an i
   x <- c(-1, -4, 2, 2, 1)
   d <- data.frame(s = sites, x = x, y = x + (sites == 0))
   backends <- "fallback"
-  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     backends <- c(backends, "rust")
   }
   for (backend in backends) {
@@ -211,7 +211,7 @@ test_that("Rust and fallback agree and preserve the stable Milestone 1 results",
   d1000 <- utils::read.csv(bench_1000_path)
   fit1000 <- stats::lm(y ~ x1 + x2, data = d1000)
 
-  rust_available <- is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")
+  rust_available <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
   backends <- if (rust_available) c("rust", "fallback") else "fallback"
 
   cases <- list(
@@ -294,7 +294,7 @@ test_that("Rust and fallback agree and preserve the stable Milestone 1 results",
 })
 
 test_that("nthreads = 1 runs Rust on 1 thread and matches multi-threaded and fallback", {
-  skip_if_not(is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
   bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
@@ -348,7 +348,7 @@ test_that("SPATIAL_BACKEND and spatial.backend options govern backend selection 
   out_env_fb <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1)
   expect_identical(out_env_fb$backend, "fallback")
 
-  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     # Explicit argument overrides env and option
     out_explicit <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust")
     expect_identical(out_explicit$backend, "rust")
@@ -427,7 +427,7 @@ test_that("unsupported M1 cases fall back in auto and error in explicit rust mod
     cluster = "cluster",
     avc = 0.1, uncond = TRUE, backend = "fallback"
   )
-  if (is.loaded("wrap__rust_run_exact_scpc_clustered", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     out_cl_rust <- scpc(
       fit, dat,
       coords_euclidean = c("lon", "lat"),
@@ -453,7 +453,7 @@ test_that("unsupported M1 cases fall back in auto and error in explicit rust mod
     coords_euclidean = c("lon", "lat"),
     avc = 0.1, method = "approx", uncond = TRUE, backend = "fallback"
   )
-  if (is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     out_approx_rust <- scpc(
       fit_approx, dat_approx,
       coords_euclidean = c("lon", "lat"),
@@ -467,7 +467,7 @@ test_that("unsupported M1 cases fall back in auto and error in explicit rust mod
     expect_identical(out_approx_auto$backend, "fallback")
   }
 
-  if (!is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (!is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     expect_error(
       scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust"),
       "not loaded"
@@ -476,7 +476,7 @@ test_that("unsupported M1 cases fall back in auto and error in explicit rust mod
 })
 
 test_that("no-intercept OLS, 1D Euclidean coords, and tied grids behave as expected", {
-  skip_if_not(is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
   set.seed(77)
   n <- 40
   d <- data.frame(
@@ -516,7 +516,7 @@ test_that("scale-invariant calibration and co-location floor match defining orac
   fit30 <- stats::lm(y ~ x1 + x2, data = d30)
 
   backends <- "fallback"
-  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     backends <- c("rust", "fallback")
   }
 
@@ -625,7 +625,7 @@ test_that("near-zero t-statistic matches analytic two-point Cauchy tail probabil
   )
   fit_near0 <- stats::lm(y ~ 1, data = d_near0)
   backends <- "fallback"
-  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     backends <- c("rust", "fallback")
   }
   for (bk in backends) {
@@ -656,7 +656,7 @@ test_that("small-unit regressor rank and positive outcome rescaling preserve inf
   fit_base <- stats::lm(y ~ x_base, data = d_rank)
 
   backends <- "fallback"
-  if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     backends <- c("rust", "fallback")
   }
 
@@ -713,7 +713,7 @@ test_that("small-unit regressor rank and positive outcome rescaling preserve inf
 })
 
 test_that("forked children route according to the native provider", {
-  skip_if_not(is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
   skip_on_os("windows")
   skip_if_not_installed("parallel")
 
@@ -808,7 +808,7 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
       dat$fe2 <- rep(seq_len(5L), times = 5L)
       fit_fe <- fixest::feols(y ~ x | fe, data = dat)
       fit_fe2 <- fixest::feols(y ~ x | fe + fe2, data = dat)
-      has_rust_full <- is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR")
+      has_rust <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
 
       for (uncond_flag in c(TRUE, FALSE)) {
         out_fe_auto <- scpc(
@@ -821,7 +821,7 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
           coords_euclidean = c("lon", "lat"),
           avc = 0.1, uncond = uncond_flag, backend = "fallback"
         )
-        if (has_rust_full || (uncond_flag && is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"))) {
+        if (has_rust) {
           expect_identical(out_fe_auto$backend, "rust")
           expect_equal(out_fe_auto$scpcstats, out_fe_fb$scpcstats, tolerance = 1e-10)
         } else {
@@ -843,7 +843,7 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
           avc = 0.1, uncond = FALSE, backend = "rust"
         )
       )
-      if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+      if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
         out_2way_uncond <- scpc(
           fit_fe2, dat,
           coords_euclidean = c("lon", "lat"),
@@ -852,7 +852,7 @@ test_that("ineligible models route to fallback in auto and error in rust regardl
         expect_identical(out_2way_uncond$backend, "rust")
       }
 
-      if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) {
+      if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
         fit_fe_plain <- fixest::feols(y ~ x, data = dat)
         out_plain_auto <- scpc(
           fit_fe_plain, dat,
@@ -895,7 +895,7 @@ test_that("forced fallback and ineligible auto calls ignore invalid ambient thre
 })
 
 test_that("clustered exact OLS matches fallback across bench_200 and factor/string clusters", {
-  skip_if_not(is.loaded("wrap__rust_run_exact_scpc_clustered", PACKAGE = "scpcR"), "native Rust library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
   bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
@@ -927,7 +927,7 @@ test_that("clustered exact OLS matches fallback across bench_200 and factor/stri
 
 test_that("IV and 1-way absorbed FE Rust paths match fallback across unclustered and clustered fits", {
   skip_if_not_installed("fixest")
-  skip_if_not(is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR"), "native Rust library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
 
   with_fixest_single_thread({
     set.seed(2027)
@@ -993,7 +993,7 @@ test_that("IV and 1-way absorbed FE Rust paths match fallback across unclustered
 })
 
 test_that("Nystrom approx SCPC matches fallback on bench_200 OLS and IV/FE/clustered fits", {
-  skip_if_not(is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
   bench_200_path <- testthat::test_path("fixtures", "bench_200.csv")
 
   d200 <- utils::read.csv(bench_200_path)
@@ -1090,7 +1090,7 @@ test_that("Nystrom approx SCPC matches fallback on bench_200 OLS and IV/FE/clust
 })
 
 test_that("method overrides 4500 threshold and approx tied eigenspace falls back in auto", {
-  skip_if_not(is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
+  skip_if_not(is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR"), "native approx library not loaded")
   set.seed(2026)
   n_big <- 4500L
   d_big <- data.frame(
@@ -1133,7 +1133,7 @@ test_that("invalid approximate covariance has its own error across available bac
   d <- data.frame(x = cos(i), y = sin(2 * i), s1 = i, s2 = sin(i))
   fit <- lm(y ~ x, d)
   backends <- "fallback"
-  if (is.loaded("wrap__rust_run_approx_scpc", PACKAGE = "scpcR")) {
+  if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
     backends <- c(backends, "rust", "auto")
   }
   for (backend in backends) {

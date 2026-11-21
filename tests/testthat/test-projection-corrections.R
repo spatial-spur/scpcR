@@ -40,7 +40,7 @@ test_that("identity-instrument weights reproduce the independent five-site cutof
   oms <- .getOms(spc$distmat, spc$c0, spc$cmax, weights, 1.2)
   cv <- max(spc$cvfin, .getcv(oms, q, 0.05))
   expect_equal(as.numeric(cv), 17.62678224, tolerance = 1e-7)
-  backends <- c("fallback", if (is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR")) "rust")
+  backends <- c("fallback", if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) "rust")
   for (backend in backends) {
     a <- scpc(ols, d, coords_euclidean = "s", avc = 0.5, cvs = TRUE,
               backend = backend, nthreads = 1L)
@@ -57,7 +57,7 @@ test_that("clustered absorbed FE weights match explicit dummies", {
   d$s <- rep(runif(30), each = 2)
   absorbed <- fixest::feols(y ~ x | g, d, nthreads = 1)
   dummy <- lm(y ~ x + factor(g), d)
-  backends <- c("fallback", if (is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR")) "rust")
+  backends <- c("fallback", if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) "rust")
   for (backend in backends) {
     a <- scpc(absorbed, d, coords_euclidean = "s", cluster = "cl", cvs = TRUE,
               backend = backend, nthreads = 1L)
@@ -79,7 +79,7 @@ test_that("clustered oblique IV with crossed FE matches explicit FE dummies", {
   d$s <- rep(runif(30), each = 2)
   a_fit <- fixest::feols(y ~ 1 | g | x ~ z, d, nthreads = 1L)
   b_fit <- fixest::feols(y ~ factor(g) | x ~ z, d, nthreads = 1L)
-  backends <- c("fallback", if (is.loaded("wrap__rust_run_exact_scpc_full", PACKAGE = "scpcR")) "rust")
+  backends <- c("fallback", if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) "rust")
   for (backend in backends) {
     a <- scpc(a_fit, d, coords_euclidean = "s", cluster = "cl", cvs = TRUE,
               backend = backend, nthreads = 1L)

@@ -712,7 +712,7 @@ test_that("small-unit regressor rank and positive outcome rescaling preserve inf
   }
 })
 
-test_that("nthreads = 1 stays fork-safe in parallel::mcparallel after warming threads", {
+test_that("forked children route according to the native provider", {
   skip_if_not(is.loaded("wrap__rust_run_exact_scpc", PACKAGE = "scpcR"), "native Rust library not loaded")
   skip_on_os("windows")
   skip_if_not_installed("parallel")
@@ -733,14 +733,19 @@ test_that("nthreads = 1 stays fork-safe in parallel::mcparallel after warming th
     avc = 0.03, uncond = FALSE, cvs = TRUE,
     backend = "rust", nthreads = 4L
   )
+  info <- .Call("wrap__rust_build_info", PACKAGE = "scpcR")
+  blocked <- identical(info$linalg_provider, "accelerate")
 
   job <- parallel::mcparallel({
-    scpc(
+    forced <- tryCatch(scpc(
       fit60, d60,
       coords_euclidean = c("s_1", "s_2"),
       avc = 0.03, uncond = FALSE, cvs = TRUE,
       backend = "rust", nthreads = 1L
-    )
+    ), error = conditionMessage)
+    auto <- scpc(fit60, d60, coords_euclidean = c("s_1", "s_2"), avc = 0.03,
+                 cvs = TRUE, backend = "auto", nthreads = 1L)
+    list(forced = forced, auto = auto)
   })
   collected <- NULL
   deadline <- proc.time()[["elapsed"]] + 15
@@ -754,10 +759,16 @@ test_that("nthreads = 1 stays fork-safe in parallel::mcparallel after warming th
     fail("mcparallel child timed out after warming Rust thread pools")
   }
   child_out <- collected[[1L]]
-  expect_s3_class(child_out, "scpc")
-  expect_identical(child_out$backend, "rust")
-  expect_equal(child_out$scpcstats, warm_1$scpcstats, tolerance = 1e-12)
-  expect_equal(child_out$scpccvs, warm_4$scpccvs, tolerance = 1e-12)
+  if (blocked) {
+    expect_match(child_out$forced, "Accelerate was used before this process forked")
+    expect_identical(child_out$auto$backend, "fallback")
+    expect_identical(child_out$auto$fallback_reason, "forked_process")
+  } else {
+    expect_s3_class(child_out$forced, "scpc")
+    expect_identical(child_out$auto$backend, "rust")
+  }
+  expect_equal(child_out$auto$scpcstats, warm_1$scpcstats, tolerance = 1e-10)
+  expect_equal(child_out$auto$scpccvs, warm_4$scpccvs, tolerance = 1e-10)
 })
 
 test_that("ineligible models route to fallback in auto and error in rust regardless of uncond", {
@@ -1146,7 +1157,7 @@ test_that("rust_build_info reports provider and post-fork mclapply does not dead
   # Warm a multi-thread Rayon pool in the parent R process first.
   parent_res <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust", nthreads = 2L)
   child_res <- parallel::mclapply(1:2, function(i) {
-    scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust", nthreads = 2L)$scpcstats
+    scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "auto", nthreads = 2L)$scpcstats
   }, mc.cores = 2L)
   expect_equal(child_res[[1L]], parent_res$scpcstats, tolerance = 1e-12)
   expect_equal(child_res[[2L]], parent_res$scpcstats, tolerance = 1e-12)

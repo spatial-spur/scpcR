@@ -8,7 +8,7 @@
 #' @export
 print.scpc <- function(x, ...) {
   cat("\nSCPC Inference (ncoef =", nrow(x$scpcstats), ", q =", x$q, ")\n\n")
-  stats::printCoefmat(x$scpcstats[, 1:4], P.values = TRUE, has.Pvalue = TRUE)
+  stats::printCoefmat(x$scpcstats[, 1:4, drop = FALSE], P.values = TRUE, has.Pvalue = TRUE)
   if (!is.null(x$scpccvs)) {
     cat("\nTwo-sided critical values:\n")
     print(x$scpccvs)

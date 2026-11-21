@@ -168,9 +168,19 @@ scpc <- function(model,
     stop("SCPC does not support models fitted with regression weights.", call. = FALSE)
   }
 
+  if (inherits(model, "glm")) {
+    fam <- model$family
+    if (is.null(fam) || !identical(fam$family, "gaussian") || !identical(fam$link, "identity")) {
+      stop("SCPC only supports Gaussian identity-link GLMs.", call. = FALSE)
+    }
+  }
+
   ## 1. Influence functions --------------------------------------------------
-  S <- sandwich::estfun(model)
   coef_vec <- stats::coef(model)
+  if (length(coef_vec) == 0L) {
+    stop("SCPC requires at least one estimated model coefficient.", call. = FALSE)
+  }
+  S <- sandwich::estfun(model)
   raw_coef_names <- names(coef_vec)
   is_fixest_iv <- .is_fixest_iv_second_stage(model)
   iv_cond_design <- NULL
@@ -200,7 +210,7 @@ scpc <- function(model,
 
   # Keep the model matrices in estimation-sample order. The selected backend
   # prepares its own numerical design after dispatch.
-  cond_fixef_id <- if (!uncond && .has_fixest_fe(model)) model$fixef_id else NULL
+  cond_fixef_id <- if (!uncond && .has_fixest_fe(model)) .get_fixest_fe_spec(model) else NULL
 
   coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
   coords <- coord_info$coords
@@ -235,11 +245,10 @@ scpc <- function(model,
   coef_names <- raw_coef_names[seq_len(k_use)]
 
   ## 3. Native Rust dispatch (exact unweighted OLS, IV, and 1-way FE)
-  fe_is_multiway <- !isTRUE(uncond) &&
-    !is.null(cond_fixef_id) &&
-    (length(model$fixef_vars) != 1L || !is.null(model$fixef_terms))
+  fe_requires_fallback <- !is.null(cond_fixef_id) &&
+    (length(model$fixef_vars) != 1L || inherits(cond_fixef_id, "scpc_varying_slopes"))
   fe_id_0 <- NULL
-  if (!isTRUE(uncond) && !is.null(cond_fixef_id) && !fe_is_multiway) {
+  if (!is.null(cond_fixef_id) && !fe_requires_fallback) {
     fe_raw <- if (is.list(cond_fixef_id)) {
       cond_fixef_id[[1L]]
     } else if (!is.null(dim(cond_fixef_id))) {
@@ -257,15 +266,21 @@ scpc <- function(model,
     "exact"
   }
   rust_eligible <- (method_actual %in% c("exact", "approx")) &&
-    !fe_is_multiway &&
+    !fe_requires_fallback &&
     !inherits(model, "glm") &&
     (inherits(model, "lm") || inherits(model, "fixest")) &&
     k_use >= 1L
   rust_loaded <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
+  rust_forked <- rust_loaded && .is_scpc_forked_child() &&
+    isTRUE(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$inherited_accelerate_state)
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
       stop("`backend = \"rust\"` was requested, but the native Rust backend is not loaded in `scpcR`.")
+    }
+    if (rust_forked) {
+      stop("Accelerate was used before this process forked. Use a fresh process or backend = 'fallback'.",
+           call. = FALSE)
     }
     if (!rust_eligible) {
       stop(
@@ -277,13 +292,15 @@ scpc <- function(model,
 
   fallback_reason <- if (identical(backend_resolved, "fallback")) {
     "requested"
+  } else if (rust_forked) {
+    "forked_process"
   } else if (!rust_loaded) {
     "native_unavailable"
   } else {
     "unsupported_model"
   }
   native_tied <- FALSE
-  if (!identical(backend_resolved, "fallback") && rust_eligible && rust_loaded) {
+  if (!identical(backend_resolved, "fallback") && rust_eligible && rust_loaded && !rust_forked) {
     nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
     rust_tied_fallback <- FALSE
     rust_res <- tryCatch(

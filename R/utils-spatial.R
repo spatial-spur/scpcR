@@ -465,7 +465,7 @@
   cvs <- lengths <- numeric(qmax)
   for (q in seq_len(qmax)) {
     cvs[q] <- .getcv(Oms, q, 0.05)
-    lengths[q] <- cvs[q] * gamma(0.5 * (q + 1)) / (sqrt(q) * gamma(0.5 * q))
+    lengths[q] <- cvs[q] * exp(lgamma(0.5 * (q + 1)) - lgamma(0.5 * q)) / sqrt(q)
   }
   q_opt <- which.min(lengths)
   list(W = W[, 1:(q_opt + 1), drop = FALSE], cv = cvs[q_opt], q = q_opt)
@@ -473,7 +473,9 @@
 
 .getnc <- function(c0, cmax, cgridfac) {
   ## Number of c-values in the multiplicative grid
-  max(2, ceiling(log(cmax / c0) / log(cgridfac)))
+  ratio <- cmax / c0
+  log_ratio <- if (is.finite(ratio) && ratio > 0) log(ratio) else log(cmax) - log(c0)
+  max(2, ceiling(log_ratio / log(cgridfac)))
 }
 
 .getOms <- function(distmat, c0, cmax, W, cgridfac) {
@@ -539,12 +541,7 @@
 
 .ln_subset_evecs <- function(distmat, c0, qmax) {
   Sig_d <- .demeanmat(exp(-c0 * distmat))
-  n <- nrow(Sig_d)
-  if (requireNamespace("RSpectra", quietly = TRUE) && qmax < n - 1) {
-    RSpectra::eigs_sym(Sig_d, k = qmax, which = "LM")$vectors
-  } else {
-    eigen(Sig_d, symmetric = TRUE)$vectors[, seq_len(qmax), drop = FALSE]
-  }
+  .leading_eigen(Sig_d, qmax, which = "LM")$vectors[, seq_len(qmax), drop = FALSE]
 }
 
 .lnset_wc0 <- function(S, avc0, qmax, minavc, latlong,
@@ -785,7 +782,7 @@
     }
     fin <- .setfinalW(Oms, W, qmax)
     if (fin$q < qmax || qmax >= q_limit) break
-    qmax <- round(qmax + qmax / 2)
+    qmax <- ceiling(1.5 * qmax)
   }
 
   list(

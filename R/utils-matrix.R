@@ -14,6 +14,19 @@
   mat
 }
 
+.leading_eigen <- function(mat, k, which = "LA") {
+  n <- nrow(mat)
+  if (k < n - 1L && requireNamespace("RSpectra", quietly = TRUE)) {
+    i <- seq_len(n)
+    # A constant start lies in the nuisance eigenspace of a centered kernel.
+    start <- sin(i) + cos(sqrt(2) * i)
+    eig <- tryCatch(RSpectra::eigs_sym(mat, k = k, which = which, opts = list(initvec = start)),
+                    error = function(e) NULL)
+    if (!is.null(eig) && eig$nconv == k) return(eig)
+  }
+  eigen(mat, symmetric = TRUE)
+}
+
 .getW <- function(distmat, c0, qmax) {
   ## First qmax eigenvectors of demeaned Sigma(c0), prepended with
   ## a normalised constant vector.  All columns have unit length.
@@ -22,24 +35,19 @@
   Sig_d <- .demeanmat(Sig)
   Sig_centered <- Sig_d - (n + 1) / n
   k_check <- min(qmax + 1L, n - 1L)
-  if (requireNamespace("RSpectra", quietly = TRUE) && k_check < n - 1L) {
-    eig <- RSpectra::eigs_sym(Sig_centered, k = k_check, which = "LA")
-    vals <- Re(eig$values)
-    ord <- order(vals, decreasing = TRUE)
-    vals_check <- vals[ord[seq_len(k_check)]]
-    V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
-  } else {
-    eig <- eigen(Sig_centered, symmetric = TRUE)
-    vals <- Re(eig$values)
-    ord <- order(vals, decreasing = TRUE)
-    vals_check <- vals[ord[seq_len(k_check)]]
-    V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
-  }
+  eig <- .leading_eigen(Sig_centered, k_check)
+  ord <- order(eig$values, decreasing = TRUE)
+  vals_check <- eig$values[ord[seq_len(k_check)]]
   tied <- FALSE
   if (length(vals_check) >= 2L) {
     tol <- 1.6e-11 * max(abs(vals_check[1L]), 1.0)
     tied <- any(vals_check[-length(vals_check)] - vals_check[-1L] <= tol)
   }
+  if (tied && length(eig$values) < n) {
+    eig <- eigen(Sig_centered, symmetric = TRUE)
+    ord <- seq_len(n)
+  }
+  V <- eig$vectors[, ord[seq_len(qmax)], drop = FALSE]
   W <- cbind(rep(1, n) / sqrt(n), V)
   attr(W, "tied") <- tied
   W
@@ -169,17 +177,29 @@
     stop("Package 'fixest' is required for fixed-effect demeaning.")
   }
 
+  slope_vars <- NULL
+  slope_flag <- NULL
+  if (inherits(fixef_id, "scpc_varying_slopes")) {
+    slope_vars <- fixef_id$slope_vars
+    slope_flag <- fixef_id$slope_flag
+    fixef_id <- fixef_id$fixef_id
+  }
+  has_slopes <- !is.null(slope_vars) && length(slope_vars) > 0L
+
   groups <- if (is.list(fixef_id)) fixef_id else as.list(as.data.frame(fixef_id))
-  if (length(groups) == 1L) {
+  if (length(groups) == 1L && !has_slopes) {
     out <- .demean_one_way(A, groups[[1L]], drop_absorbed)
     return(if (restore_scale) out else .scale_design_columns(out))
   }
   original_scales <- apply(abs(A), 2L, max)
-  # Every anchor shift is in the FE span. Apply shifts cumulatively so
-  # large offsets in multiple fixed-effect dimensions are removed up front.
+  # Every anchor shift is in the FE span for groups that include an intercept.
   shifted <- A
   best <- original_scales
-  for (group in groups) {
+  for (g_idx in seq_along(groups)) {
+    if (has_slopes && !is.null(slope_flag) && slope_flag[g_idx] < 0L) {
+      next
+    }
+    group <- groups[[g_idx]]
     candidate <- shifted - shifted[match(group, group), , drop = FALSE]
     sizes <- apply(abs(candidate), 2L, max)
     take <- is.finite(sizes) & sizes < best
@@ -189,7 +209,19 @@
   scales <- .design_column_scales(shifted)
   demean <- function(values) {
     tryCatch(
-      as.matrix(fixest::demean(values, f = groups, nthreads = 1L, tol = 1e-14)),
+      if (has_slopes) {
+        as.matrix(fixest::demean(
+          values,
+          f = groups,
+          slope.vars = slope_vars,
+          slope.flag = slope_flag,
+          fixef.reorder = FALSE,
+          nthreads = 1L,
+          tol = 1e-14
+        ))
+      } else {
+        as.matrix(fixest::demean(values, f = groups, nthreads = 1L, tol = 1e-14))
+      },
       error = function(e) stop("Could not FE-demean ", arg, ": ", conditionMessage(e))
     )
   }
@@ -206,11 +238,26 @@
   size <- apply(abs(out), 2L, max)
   group_codes <- lapply(groups, function(group) match(group, unique(group)))
   counts <- lapply(group_codes, tabulate)
+  slope_groups <- rep(seq_along(groups), if (has_slopes) abs(slope_flag) else 0L)
+  slope_moments <- lapply(seq_along(slope_groups), function(j) {
+    ids <- group_codes[[slope_groups[j]]]
+    sv <- slope_vars[[j]]
+    group_scale <- .group_max(abs(sv), factor(ids))[ids]
+    scaled <- sv / ifelse(group_scale > 0, group_scale, 1)
+    list(ids = ids, slope = scaled,
+         norm = pmax(1, as.numeric(rowsum(scaled^2, ids, reorder = FALSE))))
+  })
   needs_refinement <- function() {
     bad <- rep(FALSE, ncol(out))
     for (i in seq_along(group_codes)) {
-      means <- rowsum(out, group_codes[[i]], reorder = FALSE) / counts[[i]]
-      bad <- bad | (apply(abs(means), 2L, max) > 1e-11 * size)
+      if (!has_slopes || is.null(slope_flag) || slope_flag[i] >= 0L) {
+        means <- rowsum(out, group_codes[[i]], reorder = FALSE) / counts[[i]]
+        bad <- bad | (apply(abs(means), 2L, max) > 1e-11 * size)
+      }
+    }
+    for (moment in slope_moments) {
+      residual <- rowsum(out * moment$slope, moment$ids, reorder = FALSE) / moment$norm
+      bad <- bad | (apply(abs(residual), 2L, max) > 1e-11 * size)
     }
     bad & size >= noise
   }

@@ -176,12 +176,37 @@
     length(model$fixef_vars) > 0L
 }
 
+.get_fixest_fe_spec <- function(model) {
+  if (!.has_fixest_fe(model)) {
+    return(NULL)
+  }
+  if (is.null(model$slope_flag) || all(model$slope_flag == 0L)) {
+    return(model$fixef_id)
+  }
+  order <- model$fe.reorder
+  if (is.null(order)) order <- seq_along(model$fixef_id)
+  groups <- model$fixef_id[order]
+  slope_vars <- model$slope_variables_reordered
+  slope_flag <- model$slope_flag[order]
+  if (length(slope_vars) != sum(abs(slope_flag)) ||
+      !all(vapply(slope_vars, length, integer(1L)) == length(groups[[1L]]))) {
+    stop("Conditional SCPC requires the fitted model's varying-slope data.", call. = FALSE)
+  }
+  structure(list(fixef_id = groups, slope_vars = slope_vars, slope_flag = slope_flag),
+            class = "scpc_varying_slopes")
+}
+
 .permute_fixef_id <- function(fixef_id, perm) {
   ## the large-n branch reorders rows before it rebuilds the iv
   ## residualizer. fixest keeps fixed-effect ids outside X and Z, so they
   ## need the same row order as the permuted design matrices.
   if (is.null(fixef_id)) {
     return(NULL)
+  }
+  if (inherits(fixef_id, "scpc_varying_slopes")) {
+    fixef_id$fixef_id <- .permute_fixef_id(fixef_id$fixef_id, perm)
+    fixef_id$slope_vars <- lapply(fixef_id$slope_vars, function(v) v[perm])
+    return(fixef_id)
   }
   if (is.list(fixef_id)) {
     out <- lapply(fixef_id, function(x) x[perm])
@@ -245,7 +270,7 @@
     Z = Z,
     model_mat = model_mat,
     coef_names = coef_names,
-    fixef_id = if (.has_fixest_fe(model)) model$fixef_id else NULL,
+    fixef_id = .get_fixest_fe_spec(model),
     has_fixef = .has_fixest_fe(model)
   )
 }
@@ -267,8 +292,9 @@
     stop("Internal error: fixest conditional regressors have incompatible row count.")
   }
 
-  mm <- .demean_for_scpc(mm, model$fixef_id, "fixest conditional regressors", drop_absorbed = TRUE)
-  list(model_mat = mm, include_intercept = FALSE, fixef_id = model$fixef_id)
+  fe_spec <- .get_fixest_fe_spec(model)
+  mm <- .demean_for_scpc(mm, fe_spec, "fixest conditional regressors", drop_absorbed = TRUE)
+  list(model_mat = mm, include_intercept = FALSE, fixef_id = fe_spec)
 }
 
 .resolve_coords_input <- function(data, obs_index, lon, lat, coords_euclidean) {

@@ -28,7 +28,6 @@ manual_fixest_iv_conditional_reference <- function(model,
   q <- ncol(Wfin) - 1L
   levs <- c(0.32, 0.10, 0.05, 0.01)
   cvs_uncond <- vapply(levs, function(lv) .getcv(Omsfin, q, lv), 0.0)
-  large_n_random_state <- spc$random_state
 
   stats_out <- matrix(
     NA_real_,
@@ -80,7 +79,7 @@ manual_fixest_iv_conditional_reference <- function(model,
       xj <- xj_raw
     }
     xjs <- sign(xj)
-    Wx <- .orthogonalize_W_iv(Wfin, xj, xjs, residualize = residualize)
+    Wx <- .conditional_weights(Wfin, xj, xjs, residualize = residualize)
 
     if (spc$large_n) {
       omsx_res <- .lnget_Oms(
@@ -90,11 +89,10 @@ manual_fixest_iv_conditional_reference <- function(model,
         Wx,
         1.2,
         capM = 1000000L,
-        random_t = large_n_random_state,
+        random_t = spc$random_state,
         latlong = FALSE
       )
       Omsx <- omsx_res$Oms
-      large_n_random_state <- omsx_res$state
     } else {
       Omsx <- .getOms(spc$distmat, spc$c0, spc$cmax, Wx, 1.2)
     }
@@ -806,4 +804,25 @@ test_that("ncoef = NULL reports all coefficients", {
   out <- scpc(fit, data = dat, coords_euclidean = c("lon", "lat"), avc = 0.1, uncond = TRUE)
 
   expect_equal(nrow(out$scpcstats), 2)
+})
+
+test_that("conditional Nystrom cutoffs follow the coefficient through reordering and subsetting", {
+  draw <- .scpc_pair_sample
+  testthat::local_mocked_bindings(.scpc_pair_sample = function(S, capM, random_t, latlong) {
+    draw(S, min(capM, 20000L), random_t, latlong)
+  })
+  set.seed(204)
+  d <- data.frame(x1 = rnorm(80), x2 = rnorm(80), y = rnorm(80),
+                  a = runif(80), b = runif(80))
+  fit <- function(formula, ncoef = NULL) {
+    scpc(lm(formula, d), d, coords_euclidean = c("a", "b"), ncoef = ncoef,
+         method = "approx", large_n_seed = 17, backend = "fallback", cvs = TRUE)
+  }
+  forward <- fit(y ~ 0 + x1 + x2)
+  reverse <- fit(y ~ 0 + x2 + x1)
+  first <- fit(y ~ 0 + x2 + x1, 1L)
+  for (field in c("scpcstats", "scpccvs")) {
+    expect_equal(forward[[field]], reverse[[field]][c("x1", "x2"), , drop = FALSE], tolerance = 1e-9)
+    expect_equal(first[[field]], forward[[field]]["x2", , drop = FALSE], tolerance = 1e-9)
+  }
 })

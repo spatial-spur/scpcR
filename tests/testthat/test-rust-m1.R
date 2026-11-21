@@ -1133,3 +1133,21 @@ test_that("invalid approximate covariance has its own error across available bac
     )
   }
 })
+
+test_that("rust_build_info reports provider and post-fork mclapply does not deadlock", {
+  skip_if_not(is.loaded("wrap__rust_build_info", PACKAGE = "scpcR"), "native library not loaded")
+  info <- .Call("wrap__rust_build_info", PACKAGE = "scpcR")
+  expect_true(info$linalg_provider %in% c("accelerate", "faer"))
+  expect_identical(as.integer(info$scpc_api_version), 7L)
+
+  skip_on_os("windows")
+  dat <- make_scpc_data(n = 24)
+  fit <- stats::lm(y ~ x, data = dat)
+  # Warm a multi-thread Rayon pool in the parent R process first.
+  parent_res <- scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust", nthreads = 2L)
+  child_res <- parallel::mclapply(1:2, function(i) {
+    scpc(fit, dat, coords_euclidean = c("lon", "lat"), avc = 0.1, backend = "rust", nthreads = 2L)$scpcstats
+  }, mc.cores = 2L)
+  expect_equal(child_res[[1L]], parent_res$scpcstats, tolerance = 1e-12)
+  expect_equal(child_res[[2L]], parent_res$scpcstats, tolerance = 1e-12)
+})

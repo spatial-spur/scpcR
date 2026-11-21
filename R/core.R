@@ -180,6 +180,12 @@ scpc <- function(model,
   } else {
     model_mat <- .get_scpc_model_matrix(model)
   }
+  if (inherits(model[["na.action"]], "exclude") && nrow(S) > nrow(model_mat)) {
+    na_idx <- as.integer(model[["na.action"]])
+    if (length(na_idx) > 0L && nrow(S) - length(na_idx) == nrow(model_mat)) {
+      S <- S[-na_idx, , drop = FALSE]
+    }
+  }
   n <- nrow(S)
   p <- ncol(S)
   neff <- n
@@ -192,45 +198,9 @@ scpc <- function(model,
 
   obs_index <- .get_obs_index(model, data)
 
-  cond_include_intercept <- TRUE
-  cond_fixef_id <- NULL
-  model_mat_cond <- model_mat
-  iv_residualizer <- NULL
-  if (!isTRUE(uncond) && is_fixest_iv) {
-    cond_fixef_id <- iv_cond_design$fixef_id
-    if (!is.null(cond_fixef_id)) {
-      model_mat_cond <- .demean_for_scpc(
-        iv_cond_design$model_mat,
-        cond_fixef_id,
-        "fixest IV second-stage model matrix"
-      )
-    }
-    iv_residualizer <- .make_iv_residualizer(
-      iv_cond_design$X,
-      iv_cond_design$Z,
-      fixef_id = cond_fixef_id,
-      transpose = TRUE
-    )
-    if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
-      stop(
-        "Conditional projection matrix dimensions are incompatible with model coefficients ",
-        "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
-        ", expected ", n, " x ", p, ")."
-      )
-    }
-  } else if (!isTRUE(uncond)) {
-    cond_setup <- .get_conditional_projection_setup(model, model_mat, n = n, uncond = uncond)
-    model_mat_cond <- cond_setup$model_mat
-    cond_include_intercept <- cond_setup$include_intercept
-    cond_fixef_id <- cond_setup$fixef_id
-    if (nrow(model_mat_cond) != n || ncol(model_mat_cond) != p) {
-      stop(
-        "Conditional projection matrix dimensions are incompatible with model coefficients ",
-        "(rows = ", nrow(model_mat_cond), ", cols = ", ncol(model_mat_cond),
-        ", expected ", n, " x ", p, ")."
-      )
-    }
-  }
+  # Keep the model matrices in estimation-sample order. The selected backend
+  # prepares its own numerical design after dispatch.
+  cond_fixef_id <- if (!uncond && .has_fixest_fe(model)) model$fixef_id else NULL
 
   coord_info <- .resolve_coords_input(data, obs_index, lon, lat, coords_euclidean)
   coords <- coord_info$coords
@@ -245,20 +215,16 @@ scpc <- function(model,
     if (anyNA(cl_vec)) stop("Cluster IDs must be present for every observation in the estimation sample.")
 
     ## Coordinates must be constant within clusters.
-    coord_by_cl <- rowsum(coords, cl_vec)
-    n_per_cl <- as.numeric(table(cl_vec))
-    coord_means <- coord_by_cl / n_per_cl
     coord_first <- coords[match(levels(cl_vec), cl_vec), , drop = FALSE]
-    if (max(abs(coord_means - coord_first)) > 1e-8) {
+    if (any(coords != coord_first[as.integer(cl_vec), , drop = FALSE])) {
       stop(
         "Coordinates vary within clusters. Provide coordinates that are constant ",
         "within each cluster before calling `scpc()`."
       )
     }
 
-    S <- rowsum(S, cl_vec)
     coords <- coord_first
-    neff <- nrow(S)
+    neff <- nrow(coords)
   }
 
   if (ncol(coords) == 1) coords <- cbind(coords, 0)
@@ -295,16 +261,7 @@ scpc <- function(model,
     !inherits(model, "glm") &&
     (inherits(model, "lm") || inherits(model, "fixest")) &&
     k_use >= 1L
-  rust_sym <- if (identical(method_actual, "approx")) {
-    "wrap__rust_run_approx_scpc"
-  } else if (!isTRUE(uncond) && (!is.null(fe_id_0) || isTRUE(is_fixest_iv))) {
-    "wrap__rust_run_exact_scpc_full"
-  } else if (is.null(cluster)) {
-    "wrap__rust_run_exact_scpc"
-  } else {
-    "wrap__rust_run_exact_scpc_clustered"
-  }
-  rust_loaded <- is.loaded(rust_sym, PACKAGE = "scpcR")
+  rust_loaded <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
@@ -330,26 +287,15 @@ scpc <- function(model,
     nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
     rust_tied_fallback <- FALSE
     rust_res <- tryCatch(
-      .run_scpc_rust_m1(
-        coords = coords,
-        latlong = latlong,
-        avc = avc,
-        uncond = uncond,
-        cvs = cvs,
-        coef_vec = coef_vec,
-        S = S,
-        bread_inv = bread_inv,
-        model_mat_cond = model_mat_cond,
-        cond_include_intercept = cond_include_intercept,
-        k_use = k_use,
-        nthreads = nthreads_resolved,
-        cl_vec = cl_vec,
-        fe_id_0 = fe_id_0,
-        is_fixest_iv = is_fixest_iv,
-        iv_cond_design = iv_cond_design,
-        cond_fixef_id = cond_fixef_id,
-        method_actual = method_actual,
-        large_n_seed = large_n_seed
+      .run_scpc_rust_model(
+        coords, latlong, avc, cvs, coef_vec[seq_len(k_use)],
+        S, bread_inv[seq_len(k_use), , drop = FALSE],
+        design = if (uncond) NULL else if (is_fixest_iv) iv_cond_design$X else model_mat,
+        instruments = if (!uncond && is_fixest_iv) iv_cond_design$Z else NULL,
+        direction_design = if (!uncond && is_fixest_iv) model_mat else NULL,
+        cluster_id = if (is.null(cl_vec)) NULL else as.integer(cl_vec) - 1L,
+        fe_id = fe_id_0, nthreads = nthreads_resolved,
+        seed = if (identical(method_actual, "approx")) as.double(large_n_seed) else NULL
       ),
       error = function(e) {
         if (identical(method_actual, "approx") &&
@@ -393,6 +339,17 @@ scpc <- function(model,
     }
   }
 
+  if (!is.null(cluster)) S <- rowsum(S, cl_vec)
+  cond_include_intercept <- FALSE
+  model_mat_cond <- model_mat
+  if (!uncond && is_fixest_iv) {
+    model_mat_cond <- .demean_for_scpc(model_mat, cond_fixef_id, "fixest IV second-stage model matrix")
+  } else if (!uncond) {
+    setup <- .get_conditional_projection_setup(model, model_mat, n, uncond)
+    model_mat_cond <- setup$model_mat
+    cond_include_intercept <- setup$include_intercept
+  }
+
   ## 4. Spatial kernel (pure-R fallback, unconditional) ----------------------
   spc <- .setOmsWfin(
     coords,
@@ -406,7 +363,29 @@ scpc <- function(model,
   Omsfin <- spc$Omsfin
   perm <- spc$perm
   q <- ncol(Wfin) - 1
-  large_n_random_state <- spc$random_state
+  # Common random pairs make cutoffs invariant to coefficient display order.
+  conditional_pairs <- if (!uncond && spc$large_n) {
+    .scpc_pair_sample(spc$coords, 1000000L, spc$random_state, latlong)
+  } else NULL
+
+  # Clustered projectors act in observation order. Unclustered Nyström
+  # weights use the sampled site ordering, including for fixed effects.
+  if (!uncond) {
+    obs_order <- if (is.null(cluster)) perm else seq_len(n)
+    fe_ordered <- .permute_fixef_id(cond_fixef_id, obs_order)
+    residualize <- if (is_fixest_iv) {
+      .make_iv_residualizer(iv_cond_design$X[obs_order, , drop = FALSE],
+                            iv_cond_design$Z[obs_order, , drop = FALSE],
+                            fixef_id = fe_ordered, transpose = TRUE)
+    } else {
+      .make_ols_residualizer(model_mat_cond[obs_order, , drop = FALSE],
+                             include_intercept = cond_include_intercept,
+                             fixef_id = fe_ordered, design_within = TRUE)
+    }
+    if (!is.null(cluster)) {
+      cl_vec_scpc <- factor(as.character(cl_vec), levels = levels(cl_vec)[perm])
+    }
+  }
 
   ## 5. Loop over coefficients -----------------------------------------------
   out <- matrix(NA_real_, k_use, 6)
@@ -430,93 +409,35 @@ scpc <- function(model,
     wj_perm <- wj[perm]
 
     ## unconditional statistic -----------------------------------------------
-    wj_norm <- sqrt(sum(wj_perm^2))
-    denom <- sqrt(sum((t(Wfin[, -1, drop = FALSE]) %*% wj_perm)^2))
+    wj_scale <- max(abs(wj_perm))
+    if (!is.finite(wj_scale) || wj_scale == 0) {
+      stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
+    }
+    wj_perm <- wj_perm / wj_scale
+    wj_norm <- .col_norms_safe(wj_perm)
+    denom <- .col_norms_safe(crossprod(Wfin[, -1, drop = FALSE], wj_perm))
     if (!is.finite(denom) || !is.finite(wj_norm) || wj_norm == 0 || denom <= 1e-12 * wj_norm) {
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
     tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj_perm) / denom)
-    SE <- as.numeric(denom / (sqrt(q) * sqrt(neff)))
+    SE <- as.numeric((denom / (sqrt(q) * sqrt(neff))) * wj_scale)
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
     ## conditional branch (skip when uncond = TRUE) --------------------------
     if (!uncond) {
-      cl_vec_scpc <- NULL
-      if (!is.null(cluster)) {
-        cl_vec_scpc <- if (!identical(perm, seq_len(length(perm)))) {
-          factor(as.character(cl_vec), levels = levels(cl_vec)[perm])
-        } else {
-          cl_vec
-        }
-      }
-
-      if (!is.null(cluster)) {
-        xj_indiv <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        cl_sq <- as.numeric(rowsum(xj_indiv^2, cl_vec_scpc))
-        pre_max <- if (ncol(Wfin) > 1L) {
-          max(sqrt(colSums(sweep(Wfin[, -1, drop = FALSE], 1, sqrt(cl_sq), `*`)^2)))
-        } else {
-          0
-        }
-        if (is_fixest_iv) {
-          Wx <- .orthogonalize_W_cluster_iv(
-            Wfin = Wfin,
-            cl_vec = cl_vec_scpc,
-            xj_indiv = xj_indiv,
-            residualize = iv_residualizer
-          )
-        } else {
-          ## Clustered conditional: individual-level orthogonalization
-          Wx <- .orthogonalize_W_cluster(
-            Wfin, cl_vec_scpc, xj_indiv, model_mat_cond,
-            include_intercept = cond_include_intercept,
-            fixef_id = cond_fixef_id,
-            design_within = TRUE
-          )
-        }
-      } else if (is_fixest_iv) {
-        xj_raw <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        if (isTRUE(spc$large_n)) {
-          residualize <- .make_iv_residualizer(
-            iv_cond_design$X[perm, , drop = FALSE],
-            iv_cond_design$Z[perm, , drop = FALSE],
-            fixef_id = .permute_fixef_id(iv_cond_design$fixef_id, perm),
-            transpose = TRUE
-          )
-          xj <- xj_raw[perm]
-        } else {
-          residualize <- iv_residualizer
-          xj <- xj_raw
-        }
-        xjs <- .scpc_score_sign(xj)
-        Rx <- sweep(Wfin[, -1, drop = FALSE], 1, xj, `*`)
-        pre_max <- if (ncol(Wfin) > 1L) max(sqrt(colSums(Rx^2))) else 0
-        Wx <- .orthogonalize_W_iv(
-          Wfin = Wfin,
-          xj = xj,
-          xjs = xjs,
-          residualize = residualize
-        )
+      xj <- as.numeric(neff * (model_mat_cond %*% t(bread_inv[j, , drop = FALSE])))
+      if (any(!is.finite(xj))) stop("Conditional score direction contains non-finite values.")
+      xjs <- if (is.null(cluster)) .scpc_score_sign(xj) else .normalize_cluster_direction(xj, cl_vec_scpc)
+      direction_scale <- max(abs(xj))
+      if (direction_scale > 0) xj <- xj / direction_scale
+      if (is.null(cluster)) {
+        xj <- xj[perm]
+        pre_max <- max(.col_norms_safe(sweep(Wfin[, -1, drop = FALSE], 1L, xj, `*`)))
+        Wx <- .conditional_weights(Wfin, xj, xjs[perm], residualize)
       } else {
-        ## Non-clustered conditional
-        xj <- as.numeric(neff * bread_inv[j, ] %*% t(model_mat_cond))
-        model_mat_cond_j <- model_mat_cond
-        if (isTRUE(spc$large_n)) {
-          xj <- xj[perm]
-          model_mat_cond_j <- model_mat_cond[perm, , drop = FALSE]
-          cond_fixef_id_j <- .permute_fixef_id(cond_fixef_id, perm)
-        } else {
-          cond_fixef_id_j <- cond_fixef_id
-        }
-        xjs <- .scpc_score_sign(xj)
-        Rx <- sweep(Wfin[, -1, drop = FALSE], 1, xj, `*`)
-        pre_max <- if (ncol(Wfin) > 1L) max(sqrt(colSums(Rx^2))) else 0
-        Wx <- .orthogonalize_W(
-          Wfin, xj, xjs, model_mat_cond_j,
-          include_intercept = cond_include_intercept,
-          fixef_id = cond_fixef_id_j,
-          design_within = TRUE
-        )
+        cl_norm <- .cluster_l2_norms(xj, cl_vec_scpc)
+        pre_max <- max(.col_norms_safe(sweep(Wfin[, -1, drop = FALSE], 1L, cl_norm, `*`)))
+        Wx <- .conditional_cluster_weights(Wfin, cl_vec_scpc, xj, residualize, xjs)
       }
 
       if (!all(is.finite(Wx))) {
@@ -526,20 +447,15 @@ scpc <- function(model,
         stop("Conditional projection produced W with incompatible dimensions for coefficient: ", coef_names[[j]])
       }
       if (ncol(Wx) > 1L) {
-        col_norms <- sqrt(colSums(Wx[, -1, drop = FALSE]^2))
+        col_norms <- .col_norms_safe(Wx[, -1, drop = FALSE])
         if (!is.finite(pre_max) || pre_max == 0 || any(!is.finite(col_norms)) || all(col_norms <= 1e-12 * pre_max)) {
           stop("Conditional projection collapsed all non-constant W columns for coefficient: ", coef_names[[j]])
         }
       }
 
-      omsx_res <- .get_conditional_Oms(
-        spc,
-        Wx,
-        latlong = latlong,
-        random_state = large_n_random_state
-      )
-      Omsx <- omsx_res$Oms
-      large_n_random_state <- omsx_res$random_state
+      # The Gaussian rejection event is invariant to one common scale of W.
+      Wx <- Wx / max(abs(Wx))
+      Omsx <- .get_conditional_Oms(spc, Wx, conditional_pairs)
       p_c <- .maxrp(Omsx, q, abs(tau_u) / sqrt(q))$max
       cvx <- .getcv(Omsx, q, 0.05)
       p_final <- max(p_u, p_c)
@@ -644,6 +560,22 @@ scpc <- function(model,
   as.integer(round(val))
 }
 
+.scpc_runtime_env <- new.env(parent = emptyenv())
+.scpc_runtime_env$init_pid <- NULL
+
+.onLoad <- function(libname, pkgname) {
+  .scpc_runtime_env$init_pid <- Sys.getpid()
+}
+
+.is_scpc_forked_child <- function() {
+  init <- .scpc_runtime_env$init_pid
+  if (is.null(init)) {
+    .scpc_runtime_env$init_pid <- Sys.getpid()
+    return(FALSE)
+  }
+  !identical(Sys.getpid(), init)
+}
+
 .is_r_check_limit_cores <- function() {
   val <- trimws(Sys.getenv("_R_CHECK_LIMIT_CORES_", unset = ""))
   nzchar(val) && !tolower(val) %in% c("false", "0", "no")
@@ -653,6 +585,8 @@ scpc <- function(model,
   resolved <- NULL
   if (!is.null(nthreads)) {
     resolved <- .parse_positive_int_threads(nthreads, "`nthreads`")
+  } else if (.is_scpc_forked_child()) {
+    return(1L)
   } else {
     opt_threads <- getOption("scpcR.threads")
     if (!is.null(opt_threads)) {
@@ -679,216 +613,22 @@ scpc <- function(model,
   resolved
 }
 
-.build_ols_orthonormal_basis <- function(model_mat_cond, include_intercept = TRUE, tol = 1e-10) {
-  X <- .coerce_numeric_matrix(model_mat_cond, "OLS residualizer X")$mat
-  has_intercept <- !is.null(colnames(X)) && "(Intercept)" %in% colnames(X)
-  if (isTRUE(include_intercept) && !has_intercept) {
-    X <- cbind("(Intercept)" = 1, X)
+.run_scpc_rust_model <- function(coords, latlong, avc, cvs, coef, scores, bread,
+                                 design, instruments, direction_design,
+                                 cluster_id, fe_id, nthreads, seed) {
+  as_double_matrix <- function(x) {
+    if (is.null(x)) return(NULL)
+    x <- as.matrix(x)
+    storage.mode(x) <- "double"
+    x
   }
-  if (ncol(X) == 0L) {
-    return(matrix(0, nrow = nrow(X), ncol = 0L))
-  }
-
-  qrX <- qr(.scale_design_columns(X), tol = tol)
-  if (qrX$rank < ncol(X)) {
-    stop("OLS residualizer is rank deficient.", call. = FALSE)
-  }
-  if (qrX$rank == 0L) {
-    return(matrix(0, nrow = nrow(X), ncol = 0L))
-  }
-
-  Q_x <- qr.Q(qrX)[, seq_len(qrX$rank), drop = FALSE]
-  if (is.null(dim(Q_x))) {
-    Q_x <- matrix(Q_x, nrow = nrow(X), ncol = qrX$rank)
-  }
-  storage.mode(Q_x) <- "double"
-  Q_x
-}
-
-.run_scpc_rust_m1 <- function(coords,
-                              latlong,
-                              avc,
-                              uncond,
-                              cvs,
-                              coef_vec,
-                              S,
-                              bread_inv,
-                              model_mat_cond,
-                              cond_include_intercept,
-                              k_use,
-                              nthreads,
-                              cl_vec = NULL,
-                              fe_id_0 = NULL,
-                              is_fixest_iv = FALSE,
-                              iv_cond_design = NULL,
-                              cond_fixef_id = NULL,
-                              method_actual = "exact",
-                              large_n_seed = 1) {
-  n <- nrow(S)
-  coords_mat <- as.matrix(coords)
-  storage.mode(coords_mat) <- "double"
-
-  coef_use <- as.double(coef_vec[seq_len(k_use)])
-  bread_sub <- bread_inv[seq_len(k_use), , drop = FALSE]
-  wj_mat <- sweep(n * (S %*% t(bread_sub)), 2L, coef_use, "+")
-  storage.mode(wj_mat) <- "double"
-
-  cl_drop <- if (is.null(cl_vec)) NULL else droplevels(cl_vec)
-  cl_id_0 <- if (is.null(cl_drop)) {
-    NULL
-  } else {
-    id <- as.integer(cl_drop) - 1L
-    storage.mode(id) <- "integer"
-    id
-  }
-
-  if (isTRUE(uncond)) {
-    rust_xj <- NULL
-    rust_xjs <- NULL
-    proj_u <- NULL
-    proj_v <- NULL
-    fe_id_0 <- NULL
-  } else {
-    xj_mat <- n * (model_mat_cond %*% t(bread_sub))
-    storage.mode(xj_mat) <- "double"
-    if (is.null(cl_drop)) {
-      xjs_mat <- .scpc_score_sign(xj_mat)
-    } else {
-      cl_sq <- as.matrix(rowsum(xj_mat^2, cl_drop))
-      cl_norm <- sqrt(cl_sq)[as.integer(cl_drop), , drop = FALSE]
-      xjs_mat <- ifelse(cl_norm > 0, xj_mat / cl_norm, 0)
-    }
-    storage.mode(xjs_mat) <- "double"
-
-    if (isTRUE(is_fixest_iv)) {
-      iv_proj <- .build_iv_projector(
-        iv_cond_design$X,
-        iv_cond_design$Z,
-        fixef_id = cond_fixef_id
-      )
-      # Denominator columns are Xi_s' M_IV' Xi R, with M_IV = I - U V'.
-      proj_u <- iv_proj$V
-      proj_v <- iv_proj$U
-      rust_xj <- xj_mat
-      rust_xjs <- xjs_mat
-    } else {
-      Q_x <- .build_ols_orthonormal_basis(
-        model_mat_cond,
-        include_intercept = cond_include_intercept
-      )
-      proj_u <- Q_x
-      proj_v <- Q_x
-      rust_xj <- xj_mat
-      rust_xjs <- xjs_mat
-    }
-  }
-
-  if (identical(method_actual, "approx")) {
-    norm_s <- .normalize_s(coords_mat, isTRUE(latlong))
-    coords_mat <- as.matrix(norm_s$coords)
-    storage.mode(coords_mat) <- "double"
-    perm <- norm_s$perm
-    wj_mat <- wj_mat[perm, , drop = FALSE]
-    if (!isTRUE(uncond)) {
-      if (!is.null(cl_drop)) {
-        cl_perm <- factor(as.character(cl_drop), levels = levels(cl_drop)[perm])
-        cl_id_0 <- as.integer(cl_perm) - 1L
-        storage.mode(cl_id_0) <- "integer"
-      } else {
-        rust_xj <- rust_xj[perm, , drop = FALSE]
-        rust_xjs <- rust_xjs[perm, , drop = FALSE]
-        proj_u <- proj_u[perm, , drop = FALSE]
-        proj_v <- proj_v[perm, , drop = FALSE]
-        if (!is.null(fe_id_0)) {
-          fe_id_0 <- fe_id_0[perm]
-        }
-      }
-    }
-  }
-
-  res <- if (identical(method_actual, "approx")) {
-    .Call(
-      "wrap__rust_run_approx_scpc",
-      coords_mat,
-      isTRUE(latlong),
-      as.double(avc),
-      isTRUE(uncond),
-      isTRUE(cvs),
-      coef_use,
-      wj_mat,
-      rust_xj,
-      rust_xjs,
-      proj_u,
-      proj_v,
-      0.001,
-      nthreads,
-      cl_id_0,
-      fe_id_0,
-      as.double(large_n_seed),
-      1000L,
-      20L,
-      1000000L,
-      PACKAGE = "scpcR"
-    )
-  } else if (!isTRUE(uncond) && (!is.null(fe_id_0) || isTRUE(is_fixest_iv))) {
-    .Call(
-      "wrap__rust_run_exact_scpc_full",
-      coords_mat,
-      isTRUE(latlong),
-      as.double(avc),
-      isTRUE(uncond),
-      isTRUE(cvs),
-      coef_use,
-      wj_mat,
-      rust_xj,
-      rust_xjs,
-      proj_u,
-      proj_v,
-      0.001,
-      nthreads,
-      cl_id_0,
-      fe_id_0,
-      PACKAGE = "scpcR"
-    )
-  } else if (is.null(cl_id_0)) {
-    .Call(
-      "wrap__rust_run_exact_scpc",
-      coords_mat,
-      isTRUE(latlong),
-      as.double(avc),
-      isTRUE(uncond),
-      isTRUE(cvs),
-      coef_use,
-      wj_mat,
-      rust_xj,
-      rust_xjs,
-      proj_u,
-      proj_v,
-      0.001,
-      nthreads,
-      PACKAGE = "scpcR"
-    )
-  } else {
-    .Call(
-      "wrap__rust_run_exact_scpc_clustered",
-      coords_mat,
-      isTRUE(latlong),
-      as.double(avc),
-      isTRUE(uncond),
-      isTRUE(cvs),
-      coef_use,
-      wj_mat,
-      rust_xj,
-      rust_xjs,
-      proj_u,
-      proj_v,
-      0.001,
-      nthreads,
-      cl_id_0,
-      PACKAGE = "scpcR"
-    )
-  }
-
+  res <- .Call(
+    "wrap__rust_run_model_scpc", as_double_matrix(coords), isTRUE(latlong),
+    as.double(avc), isTRUE(cvs), as.double(coef), as_double_matrix(scores),
+    as_double_matrix(bread), as_double_matrix(design), as_double_matrix(instruments),
+    as_double_matrix(direction_design), cluster_id, fe_id, nthreads, seed,
+    PACKAGE = "scpcR"
+  )
   if (inherits(res, "extendr_error")) {
     if (inherits(res$value, "condition")) stop(res$value)
     stop(res$value, call. = FALSE)

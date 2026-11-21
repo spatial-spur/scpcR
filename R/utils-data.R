@@ -67,8 +67,8 @@
 }
 
 .is_fixest_iv_second_stage <- function(model) {
-  # fix: current fixest marks iv models with is_iv, so use that flag here.
-  if (!inherits(model, "fixest") || !isTRUE(model$is_iv)) {
+  # Support both fixest >= 0.14 (model$is_iv) and earlier fixest (model$iv).
+  if (!inherits(model, "fixest") || !(isTRUE(model[["is_iv"]]) || isTRUE(model[["iv"]]))) {
     return(FALSE)
   }
   stage <- tryCatch(as.integer(model$iv_stage[[1L]]), error = function(e) NA_integer_)

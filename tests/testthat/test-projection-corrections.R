@@ -12,7 +12,7 @@ test_that("IV weights use the transpose of an oblique residual maker", {
   expected <- w
   expected[, 1] <- w[, 1] * abs(direction)
   expected[, -1] <- sign(direction) * (t(m) %*% (direction * w[, -1]))
-  expect_equal(.orthogonalize_W_iv(w, direction, sign(direction), residualize),
+  expect_equal(.conditional_weights(w, direction, sign(direction), residualize),
                expected, tolerance = 1e-12)
 
   cl <- factor(rep(1:4, each = 2))
@@ -23,7 +23,7 @@ test_that("IV weights use the transpose of an oblique residual maker", {
     as.numeric(rowsum(wi[, 1] * normalized * direction, cl)),
     rowsum(normalized * (t(m) %*% (direction * wi[, -1])), cl)
   )
-  expect_equal(.orthogonalize_W_cluster_iv(wc, cl, direction, residualize),
+  expect_equal(.conditional_cluster_weights(wc, cl, direction, residualize),
                unname(expected_cluster), ignore_attr = TRUE, tolerance = 1e-12)
 })
 
@@ -35,7 +35,7 @@ test_that("identity-instrument weights reproduce the independent five-site cutof
   direction <- as.numeric(nrow(d) * (sandwich::bread(ols) / nrow(d))["x", ] %*% t(X))
   spc <- .setOmsWfin(cbind(d$s, 0), avc0 = 0.5, latlong = FALSE, method = "exact")
   residualize <- .make_iv_residualizer(X, X, transpose = TRUE)
-  weights <- .orthogonalize_W_iv(spc$Wfin, direction, sign(direction), residualize)
+  weights <- .conditional_weights(spc$Wfin, direction, sign(direction), residualize)
   q <- ncol(weights) - 1L
   oms <- .getOms(spc$distmat, spc$c0, spc$cmax, weights, 1.2)
   cv <- max(spc$cvfin, .getcv(oms, q, 0.05))

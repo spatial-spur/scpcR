@@ -172,3 +172,29 @@ test_that("two-way projection keeps translated variation and rejects absorbed co
   )(y)
   expect_equal(dirty, clean, tolerance = 1e-9)
 })
+
+test_that("selected OLS rank is invariant to regressor units", {
+  x <- c(-1, 1, -1, 1)
+  z <- c(-1, -1, 1, 1)
+  for (units in c(1e-200, 1, 1e200)) {
+    fit <- .make_ols_residualizer(cbind(x, units * (x + 1e-9*z)), FALSE)
+    expect_lt(max(abs(fit(z))), 1e-6)
+    for (gap in c(1e-11, 1e-13)) {
+      expect_error(.make_ols_residualizer(cbind(x, units * (x + gap*z)), FALSE),
+                   "rank deficient")
+    }
+  }
+})
+
+test_that("within contrasts use the spacing and scale of their own group", {
+  top <- .Machine$double.xmax
+  ulp <- 2^971
+  tiny <- 1e-300
+  x <- c(top, tiny, top - ulp, 2*tiny, top - 2*ulp, 3*tiny)
+  residuals <- .demean_for_scpc(cbind(x), list(c(1,2,1,2,1,2)), "x", drop_absorbed=TRUE)
+  expect_equal(residuals[c(1,3,5)] / ulp, c(1,0,-1))
+  expect_equal(residuals[c(2,4,6)] / tiny, c(-1,0,1))
+  group <- factor(c(3,3,1), levels=1:3)
+  expect_equal(.normalize_cluster_direction(c(4,3,0), group), c(.8,.6,0))
+  expect_equal(.cluster_l2_norms(c(4,3,0), group), c(0,0,5))
+})

@@ -58,3 +58,17 @@ test_that("GLM weight detection uses only fitted prior weights and accepts a nam
   with_column <- stats::glm(y ~ x, data = d, weights = w, model = FALSE)
   expect_true(.has_regression_weights(with_column, d))
 })
+
+test_that("cluster coordinates are checked observation by observation", {
+  data <- data.frame(y = sin(1:12), x = cos(1:12), site = rep(1:4, each = 3),
+                     loc = c(0, 1, -1, rep(2:4, each = 3)))
+  fit <- lm(y ~ x, data)
+  for (backend in c("fallback", "rust")) {
+    expect_error(scpc(fit, data, cluster = "site", coords_euclidean = "loc", backend = backend),
+                 "Coordinates vary within clusters")
+    missing_id <- data
+    missing_id$site[1] <- NA_integer_
+    expect_error(scpc(fit, missing_id, cluster = "site", coords_euclidean = "loc", backend = backend),
+                 "Cluster IDs must be present")
+  }
+})

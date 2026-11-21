@@ -225,26 +225,134 @@
 .GQx <- .GQ[, 1] * 0.5 + 0.5
 .GQw <- .GQ[, 2] * 0.5
 
+.bivariate_rejection <- function(a, b, d, cv) {
+  # The signed product (X - cv Y)(X + cv Y) has an exact Gaussian quadrant probability.
+  tol <- 64 * .Machine$double.eps
+  magnitude <- max(abs(c(a, b, d)))
+  if (magnitude == 0) return(0)
+  v <- c(a, d) / magnitude + tol
+  if (min(v) < 0 || abs(b) / magnitude > prod(sqrt(v))) stop("SCPC covariance is not positive semidefinite.")
+  a <- max(0, a)
+  d <- max(0, d)
+  if (min(a, d) == 0) return(as.numeric(a > 0))
+  # Exact products in scaled units distinguish a tiny determinant from a tie.
+  e <- pmax(-1022, pmin(1023, floor(log2(c(a, d)))))
+  eb <- floor(sum(e) / 2)
+  an <- a / 2^e[1L]
+  dn <- (d / 2^e[2L]) * 2^(sum(e) - 2*eb)
+  bn <- b / 2^eb
+  ad <- an * dn
+  bb <- bn * bn
+  det <- if (bb > 2*ad) 0 else max(0, (ad - bb) +
+    (.scpc_product_tail(an,dn,ad) - .scpc_product_tail(bn,bn,bb)))
+  t <- cv * 2^(eb - e[1L])
+  if (t > 2^500) {
+    spread <- 2 * sqrt(det) / t
+    difference <- dn
+  } else {
+    td <- t * dn
+    ttd <- t * td
+    spread <- 2 * t * sqrt(det)
+    difference <- (ttd - an) + (t * .scpc_product_tail(t,dn,td) + .scpc_product_tail(td,t,ttd))
+  }
+  if (spread == 0) return(as.numeric(difference < 0))
+  atan2(spread, difference) / pi
+}
+
+# Dekker's error-free product. Inputs have already been scaled by a power of two.
+.scpc_product_tail <- function(x, y, p) {
+  sx <- 134217729 * x
+  sy <- 134217729 * y
+  xh <- sx - (sx - x)
+  yh <- sy - (sy - y)
+  xl <- x - xh
+  yl <- y - yh
+  xl * yl - (((p - xh * yh) - xl * yh) - xh * yl)
+}
+
+.one_factor_rejection <- function(Om, cv) {
+  if (Om[1L, 1L] <= 0 || Om[1L, 1L] * Om[2L, 2L] != Om[2L, 1L]^2) return(NULL)
+  scale <- 2^max(-1022, min(1023, floor(log2(max(diag(Om))))))
+  A <- Om / scale
+  if (any(A * scale != Om) || any(Om != t(Om))) return(NULL)
+  # Rank one is certified by vanishing minors. Keep every representable positive direction.
+  a <- A[1L, 1L]
+  rest <- A[-1L, -1L, drop = FALSE]
+  left <- A[-1L, 1L]
+  right <- rep(left, each = length(left))
+  p <- a * rest
+  if (any(p != left * right) || any(p == 0 & (rest != 0 | (left != 0 & right != 0))) ||
+      any(p != 0 & abs(p) < 2^-918)) return(NULL)
+  if (any(.scpc_product_tail(a, rest, p) != .scpc_product_tail(left, right, p))) return(NULL)
+  denominator <- sum(diag(A)[-1L])
+  as.numeric(if (cv > 1) (a / cv) / cv > denominator else a > (denominator * cv) * cv)
+}
+
+.rejection_eigenvalues <- function(Om, cv, tolerance) {
+  # Factor Om = L L' before forming the symmetric weighted quadratic form.
+  v <- diag(Om)
+  if (min(v) < -tolerance) stop("SCPC covariance is not positive semidefinite.")
+  sd <- sqrt(pmax(0, c(v[1L], rep(max(v[-1L]), length(v) - 1L))))
+  zero <- sd == 0
+  divisor <- sd
+  divisor[zero] <- 1
+  corr <- sweep(Om / divisor, 2L, divisor, "/")
+  corr[zero, ] <- 0
+  corr[, zero] <- 0
+  if (any(abs(Om[zero, , drop = FALSE]) > tolerance) || any(!is.finite(corr))) {
+    scale <- max(0, v)
+    if (scale == 0) stop("SCPC covariance is not positive semidefinite.")
+    corr <- Om / scale
+    sd[] <- sqrt(scale)
+  }
+  L <- tryCatch(t(chol(corr)), error = function(e) NULL)
+  if (is.null(L)) {
+    ev <- eigen(corr, symmetric = TRUE)
+    if (min(ev$values) < -32 * length(v) * .Machine$double.eps) {
+      scale <- max(0, v)
+      if (scale == 0) stop("SCPC covariance is not positive semidefinite.")
+      ev <- eigen(Om / scale, symmetric = TRUE)
+      if (min(ev$values) < -32 * length(v) * .Machine$double.eps) stop("SCPC covariance is not positive semidefinite.")
+      sd[] <- sqrt(scale)
+    }
+    keep <- ev$values > 0
+    if (!any(keep)) return(0)
+    L <- sweep(ev$vectors[, keep, drop = FALSE], 2L, sqrt(ev$values[keep]), "*")
+  }
+  if (cv > 1) sd[1L] <- sd[1L] / cv else sd[-1L] <- cv * sd[-1L]
+  if (max(sd) == 0) return(0)
+  W <- (sd / max(sd)) * L
+  eigen(crossprod(W[1L, , drop = FALSE]) - crossprod(W[-1L, , drop = FALSE]),
+        symmetric = TRUE, only.values = TRUE)$values
+}
+
 .getrp <- function(Om, cv) {
   ## Rejection probability for the SCPC test given Omega matrix Om
   ## and normalised critical value cv (= cv/sqrt(q) in paper notation).
   if (!is.finite(cv)) {
     stop("SCPC critical value must be finite.")
   }
-  if (cv <= 0) return(1.0)
-  max_om <- max(abs(Om))
-  if (!is.finite(max_om) || max_om <= 0) return(0.0)
-  Om <- Om / max_om
-  if (cv > 1.0) {
-    pos_scale <- 1.0 / (cv * cv)
-    neg_scale <- -1.0
-  } else {
-    pos_scale <- 1.0
-    neg_scale <- -(cv * cv)
+  if (cv < 0) return(1.0)
+  if (!is.matrix(Om) || nrow(Om) != ncol(Om) || nrow(Om) < 2L || any(!is.finite(Om))) {
+    stop("SCPC covariance must be finite and square with at least two rows.")
   }
-  Omx <- neg_scale * Om
-  Omx[1L, ] <- pos_scale * Om[1L, ]
-  evals_raw <- Re(eigen(Omx, only.values = TRUE)$values)
+  tolerance <- 32 * nrow(Om) * .Machine$double.eps * max(0, diag(Om))
+  if (any(abs(Om - t(Om)) > tolerance)) stop("SCPC covariance is not symmetric.")
+  if (nrow(Om) > 2L) {
+    active <- which(diag(Om)[-1L] != 0) + 1L
+    if (length(active) <= 1L) {
+      j <- if (length(active)) active else 2L
+      keep <- c(1L, j)
+      if (all(Om[-keep, ] == 0) && all(Om[, -keep] == 0)) Om <- Om[keep, keep]
+    }
+  }
+  if (nrow(Om) == 2L) {
+    b <- Om[1L, 2L] + 0.5 * (Om[2L, 1L] - Om[1L, 2L])
+    return(.bivariate_rejection(Om[1L, 1L], b, Om[2L, 2L], cv))
+  }
+  atom <- .one_factor_rejection(Om, cv)
+  if (!is.null(atom)) return(atom)
+  evals_raw <- .rejection_eigenvalues(Om, cv, tolerance)
   denom <- max(evals_raw)
   if (!is.finite(denom) || denom <= 0) return(0.0)
   evals <- -evals_raw[evals_raw < 0]
@@ -488,11 +596,16 @@
   }
 
   W <- matrix(0, n, qmax)
+  min_norm <- sqrt(.Machine$double.eps)
   for (i in seq_len(qmax)) {
     Wx <- Wall[, seq_len(capN * i), drop = FALSE]
     evec <- eigen(crossprod(Wx), symmetric = TRUE)$vectors[, 1, drop = FALSE]
     W[, i] <- as.numeric(Wx %*% evec)
-    W[, i] <- W[, i] / sqrt(sum(W[, i]^2))
+    norm_i <- sqrt(sum(W[, i]^2))
+    if (!is.finite(norm_i) || norm_i <= min_norm) {
+      stop("degenerate principal direction in Nystrom landmark consolidation", call. = FALSE)
+    }
+    W[, i] <- W[, i] / norm_i
     Wall <- Wall - W[, i, drop = FALSE] %*% crossprod(W[, i], Wall)
   }
 
@@ -532,19 +645,23 @@
   }
 }
 
+.scpc_pair_sample <- function(S, capM, random_t, latlong) {
+  draw <- .raninds(nrow(S), capM, random_t)
+  idx <- draw$indices
+  draw$dist <- .getdistvec(S[idx[seq_len(capM)], , drop = FALSE],
+                           S[idx[seq_len(capM) + 1L], , drop = FALSE], latlong)
+  draw
+}
+
 .lnget_Oms <- function(S, c0, cmax, W, cgridfac,
-                       capM = 1000000L, random_t = 1, latlong = FALSE) {
+                       capM = 1000000L, random_t = 1, latlong = FALSE,
+                       pairs = .scpc_pair_sample(S, capM, random_t, latlong)) {
   nc <- .getnc(c0, cmax, cgridfac)
   Oms <- vector("list", nc)
-
   n <- nrow(S)
-  inds_res <- .raninds(n, capM, random_t)
-  inds <- inds_res$indices
-  dist <- .getdistvec(
-    S[inds[seq_len(capM)], , drop = FALSE],
-    S[inds[2:(capM + 1L)], , drop = FALSE],
-    latlong
-  )
+  inds <- pairs$indices
+  dist <- pairs$dist
+  capM <- length(dist)
   W1 <- W[inds[seq_len(capM)], , drop = FALSE]
   W2 <- W[inds[2:(capM + 1L)], , drop = FALSE]
 
@@ -559,7 +676,7 @@
     c <- c * cgridfac
   }
 
-  list(Oms = Oms, state = inds_res$state)
+  list(Oms = Oms, state = pairs$state)
 }
 
 .validate_large_n_seed <- function(seed) {
@@ -687,25 +804,9 @@
   )
 }
 
-.get_conditional_Oms <- function(spc, Wx, latlong, random_state) {
-  ## the old code did this inline in scpc(). this helper keeps the same
-  ## exact-vs-large-n logic in one place so core.R stays readable.
+.get_conditional_Oms <- function(spc, Wx, pairs) {
   if (isTRUE(spc$large_n)) {
-    omsx_res <- .lnget_Oms(
-      spc$coords,
-      spc$c0,
-      spc$cmax,
-      Wx,
-      1.2,
-      capM = 1000000L,
-      random_t = random_state,
-      latlong = latlong
-    )
-    return(list(Oms = omsx_res$Oms, random_state = omsx_res$state))
+    return(.lnget_Oms(spc$coords, spc$c0, spc$cmax, Wx, 1.2, pairs = pairs)$Oms)
   }
-
-  list(
-    Oms = .getOms(spc$distmat, spc$c0, spc$cmax, Wx, 1.2),
-    random_state = random_state
-  )
+  .getOms(spc$distmat, spc$c0, spc$cmax, Wx, 1.2)
 }

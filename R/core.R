@@ -451,7 +451,13 @@ scpc <- function(model,
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
     SE <- as.numeric((denom / (sqrt(q) * sqrt(neff))) * influence_scale)
+    if (!is.finite(SE) || SE == 0) {
+      stop("SCPC standard error is outside the floating-point range.", call. = FALSE)
+    }
     tau_u <- coef_j / SE
+    if (!is.finite(tau_u)) {
+      stop("SCPC t-statistic is outside the floating-point range.", call. = FALSE)
+    }
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
     ## conditional branch (skip when uncond = TRUE) --------------------------

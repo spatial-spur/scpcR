@@ -35,8 +35,8 @@ scpc(
 }
 \arguments{
 \item{model}{Fitted model object.
-Currently supported: \code{\link{lm}} and \pkg{fixest}
-(\code{\link[fixest]{feols}}) objects, including IV models.}
+Supports \code{\link{lm}}, Gaussian identity-link \code{\link{glm}},
+and \pkg{fixest} \code{\link[fixest]{feols}} fits, including 2SLS.}
 
 \item{data}{Data frame used to fit \code{model}.  Must contain the
 coordinate columns referenced by \code{lon}/\code{lat} or
@@ -59,13 +59,13 @@ in \code{data}. Coordinates must be constant within clusters.}
 \code{NULL} reports all coefficients.}
 
 \item{avc}{Numeric; upper bound on the average pairwise correlation
-for which size is controlled.  Must be in \code{(0.001, 0.99)}.
+in the exponential benchmark.  Must be in \code{(0.001, 0.99)}.
 Default is 0.03.}
 
 \item{method}{Character string selecting the spatial algorithm.
 \code{"auto"} chooses \code{"exact"} for smaller problems and
 \code{"approx"} once the large-\eqn{n} threshold is reached.
-\code{"exact"} always uses the full distance matrix.
+\code{"exact"} uses the full distance matrix and a finite decay grid.
 \code{"approx"} uses the original large-\eqn{n} approximation branch.}
 
 \item{large_n_seed}{Numeric; integer-valued seed used by the
@@ -137,6 +137,13 @@ using the SCPC method of Mueller and Watson (2022, 2023).
 Weighted regression fits are unsupported. An indefinite sampled
   covariance causes approximate SCPC to report an error. Use exact SCPC
   when the sample size permits.
+  Inference is marginal for each coefficient. IV \eqn{t} inference requires
+  strong identification and the spatial score-process conditions in
+  Mueller and Watson (2023, Section 5.3). The conditional Gaussian
+  guarantee has additional assumptions about the errors given the
+  endogenous regressors, instruments, and exogenous controls. When the
+  unconditional argument applies, taking the larger critical value
+  preserves its protection.
 }
 \examples{
 set.seed(42)

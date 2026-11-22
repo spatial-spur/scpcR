@@ -47,7 +47,6 @@ test_that("identity-instrument weights reproduce the independent five-site cutof
     expect_equal(unname(a$scpccvs["x", 3]), cv, tolerance = 1e-8)
   }
 })
-
 test_that("clustered absorbed FE weights match explicit dummies", {
   skip_if_not_installed("fixest")
   set.seed(167)
@@ -87,5 +86,31 @@ test_that("clustered oblique IV with crossed FE matches explicit FE dummies", {
               backend = backend, nthreads = 1L)
     expect_equal(unname(a$scpcstats["fit_x", ]), unname(b$scpcstats["fit_x", ]), tolerance = 1e-7)
     expect_equal(unname(a$scpccvs["fit_x", ]), unname(b$scpccvs["fit_x", ]), tolerance = 1e-7)
+  }
+})
+test_that("a large coefficient level preserves the SCPC variance", {
+  set.seed(15)
+  noise <- round(16 * rnorm(20)) / 4
+  d <- data.frame(s = runif(40), y = c(noise, -noise))
+  for (backend in c("fallback", if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) "rust")) {
+    fit <- function(data) scpc(lm(y ~ 1, data), data, coords_euclidean = "s",
+                              avc = 0.1, backend = backend, nthreads = 1L)$scpcstats
+    base <- fit(d)
+    d_shifted <- transform(d, y = y + 1e12)
+    shifted <- fit(d_shifted)
+    expect_equal(shifted[1, 2], base[1, 2], tolerance = 1e-4)
+    expect_equal(shifted[1, 3], shifted[1, 1] / shifted[1, 2])
+  }
+})
+
+test_that("singleton clusters preserve intervals at an exact-zero direction", {
+  x <- c(-2, -1, 0, 1, 2)
+  d <- data.frame(x = x, y = x + c(1, -2, 0, 2, -1),
+                  s = c(0.774, 0.439, 0.859, 0.697, 0.094), id = seq_along(x))
+  fit <- fixest::feols(y ~ x, d)
+  for (backend in c("fallback", if (is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) "rust")) {
+    compute <- function(cluster) scpc(fit, d, coords_euclidean = "s", avc = 0.3,
+                                     cluster = cluster, backend = backend, nthreads = 1L)
+    expect_equal(compute(NULL)$scpcstats, compute("id")$scpcstats, tolerance = 1e-10)
   }
 })

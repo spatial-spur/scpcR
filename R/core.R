@@ -8,8 +8,8 @@
 #' using the SCPC method of Mueller and Watson (2022, 2023).
 #'
 #' @param model Fitted model object.
-#'   Currently supported: \code{\link{lm}} and \pkg{fixest}
-#'   (\code{\link[fixest]{feols}}) objects, including IV models.
+#'   Supports \code{\link{lm}}, Gaussian identity-link \code{\link{glm}},
+#'   and \pkg{fixest} \code{\link[fixest]{feols}} fits, including 2SLS.
 #' @param data Data frame used to fit \code{model}.  Must contain the
 #'   coordinate columns referenced by \code{lon}/\code{lat} or
 #'   \code{coords_euclidean}.
@@ -25,12 +25,12 @@
 #' @param ncoef Integer; number of coefficients to report.  Default
 #'   \code{NULL} reports all coefficients.
 #' @param avc Numeric; upper bound on the average pairwise correlation
-#'   for which size is controlled.  Must be in \code{(0.001, 0.99)}.
+#'   in the exponential benchmark.  Must be in \code{(0.001, 0.99)}.
 #'   Default is 0.03.
 #' @param method Character string selecting the spatial algorithm.
 #'   \code{"auto"} chooses \code{"exact"} for smaller problems and
 #'   \code{"approx"} once the large-\eqn{n} threshold is reached.
-#'   \code{"exact"} always uses the full distance matrix.
+#'   \code{"exact"} uses the full distance matrix and a finite decay grid.
 #'   \code{"approx"} uses the original large-\eqn{n} approximation branch.
 #' @param large_n_seed Numeric; integer-valued seed used by the
 #'   large-\eqn{n} approximation branch.  Ignored when
@@ -77,6 +77,13 @@
 #' @details Weighted regression fits are unsupported. An indefinite sampled
 #'   covariance causes approximate SCPC to report an error. Use exact SCPC
 #'   when the sample size permits.
+#'   Inference is marginal for each coefficient. IV \eqn{t} inference requires
+#'   strong identification and the spatial score-process conditions in
+#'   Mueller and Watson (2023, Section 5.3). The conditional Gaussian
+#'   guarantee has additional assumptions about the errors given the
+#'   endogenous regressors, instruments, and exogenous controls. When the
+#'   unconditional argument applies, taking the larger critical value
+#'   preserves its protection.
 #'
 #' @references
 #' Mueller, U. K. and Watson, M. W. (2022).
@@ -161,6 +168,14 @@ scpc <- function(model,
   }
   if (!is.null(cluster) && (!is.character(cluster) || length(cluster) != 1L || !nzchar(cluster))) {
     stop("`cluster` must be a single non-empty column name.")
+  }
+
+  if (inherits(model, "fixest")) {
+    if (!identical(model[["method"]], "feols")) {
+      stop("SCPC requires a fixest::feols() fit for fixest models.", call. = FALSE)
+    }
+  } else if (!inherits(model, "lm")) {
+    stop("SCPC requires an lm, Gaussian identity-link glm, or fixest::feols() fit.", call. = FALSE)
   }
 
   # The conditional benchmark is defined for unweighted fits.
@@ -268,7 +283,6 @@ scpc <- function(model,
   rust_eligible <- (method_actual %in% c("exact", "approx")) &&
     !fe_requires_fallback &&
     !inherits(model, "glm") &&
-    (inherits(model, "lm") || inherits(model, "fixest")) &&
     k_use >= 1L
   rust_loaded <- !identical(backend_resolved, "fallback") &&
     is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
@@ -421,22 +435,23 @@ scpc <- function(model,
 
   for (j in seq_len(k_use)) {
     coef_j <- coef_vec[[j]]
-    wj <- as.numeric(neff * bread_inv[j, ] %*% t(S)) + coef_j
-    wj_perm <- wj[perm]
+    influence <- as.numeric(neff * (S %*% bread_inv[j, ]))[perm]
 
     ## unconditional statistic -----------------------------------------------
-    wj_scale <- max(abs(wj_perm))
-    if (!is.finite(wj_scale) || wj_scale == 0) {
+    influence_scale <- max(abs(influence))
+    if (!is.finite(influence_scale) || influence_scale == 0) {
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
-    wj_perm <- wj_perm / wj_scale
-    wj_norm <- .col_norms_safe(wj_perm)
-    denom <- .col_norms_safe(crossprod(Wfin[, -1, drop = FALSE], wj_perm))
-    if (!is.finite(denom) || !is.finite(wj_norm) || wj_norm == 0 || denom <= 1e-12 * wj_norm) {
+    influence <- influence / influence_scale
+    influence <- influence - mean(influence)
+    influence_norm <- .col_norms_safe(influence)
+    denom <- .col_norms_safe(crossprod(Wfin[, -1, drop = FALSE], influence))
+    if (!is.finite(denom) || !is.finite(influence_norm) ||
+        influence_norm == 0 || denom <= 1e-12 * influence_norm) {
       stop("SCPC variance projection is degenerate for coefficient: ", coef_names[[j]])
     }
-    tau_u <- as.numeric(sqrt(q) * crossprod(Wfin[, 1], wj_perm) / denom)
-    SE <- as.numeric((denom / (sqrt(q) * sqrt(neff))) * wj_scale)
+    SE <- as.numeric((denom / (sqrt(q) * sqrt(neff))) * influence_scale)
+    tau_u <- coef_j / SE
     p_u <- .maxrp(Omsfin, q, abs(tau_u) / sqrt(q))$max
 
     ## conditional branch (skip when uncond = TRUE) --------------------------

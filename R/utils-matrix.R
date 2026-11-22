@@ -96,16 +96,20 @@
   row_scale <- scale[as.integer(group)]
   row_scale[row_scale == 0] <- 1
   scaled <- x / row_scale
+  count <- tabulate(as.integer(group), nlevels(group))
   norm <- numeric(nlevels(group))
-  norm[tabulate(as.integer(group), nlevels(group)) > 0L] <- sqrt(as.numeric(rowsum(scaled^2, group)))
-  list(scale = scale, scaled = scaled, norm = norm)
+  norm[count > 0L] <- sqrt(as.numeric(rowsum(scaled^2, group)))
+  list(scale = scale, scaled = scaled, norm = norm, count = count)
 }
 
 .normalize_cluster_direction <- function(xj_indiv, cl_vec) {
   parts <- .scaled_cluster_norm(xj_indiv, cl_vec)
-  norm <- parts$norm[as.integer(cl_vec)]
+  group <- as.integer(cl_vec)
+  norm <- parts$norm[group]
   norm[norm == 0] <- 1
-  parts$scaled / norm
+  direction <- parts$scaled / norm
+  direction[parts$count[group] == 1L & direction == 0] <- 1
+  direction
 }
 
 .cluster_l2_norms <- function(xj_indiv, cl_vec) {

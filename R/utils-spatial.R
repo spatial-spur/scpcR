@@ -473,16 +473,22 @@
   max(2, ceiling(log_ratio / log(cgridfac)))
 }
 
+.scpc_decay_grid <- function(c0, cmax, cgridfac) {
+  grid <- numeric(.getnc(c0, cmax, cgridfac))
+  decay <- c0
+  for (i in seq_along(grid)) {
+    grid[i] <- decay
+    decay <- decay * cgridfac
+  }
+  grid <- grid[is.finite(grid)]
+  if (is.finite(cmax) && cmax > grid[[length(grid)]]) c(grid, cmax) else grid
+}
+
 .getOms <- function(distmat, c0, cmax, W, cgridfac) {
   ## List of Omega(c) = W' Sigma(c) W matrices over the c-grid
-  nc <- .getnc(c0, cmax, cgridfac)
-  Oms <- vector("list", nc)
-  c <- c0
-  for (i in seq_len(nc)) {
-    Oms[[i]] <- crossprod(W, exp(-c * distmat) %*% W)
-    c <- c * cgridfac
-  }
-  Oms
+  lapply(.scpc_decay_grid(c0, cmax, cgridfac), function(decay) {
+    crossprod(W, exp(-decay * distmat) %*% W)
+  })
 }
 
 .normalize_s <- function(S, latlong) {
@@ -648,8 +654,6 @@
 .lnget_Oms <- function(S, c0, cmax, W, cgridfac,
                        capM = 1000000L, random_t = 1, latlong = FALSE,
                        pairs = .scpc_pair_sample(S, capM, random_t, latlong)) {
-  nc <- .getnc(c0, cmax, cgridfac)
-  Oms <- vector("list", nc)
   n <- nrow(S)
   inds <- pairs$indices
   dist <- pairs$dist
@@ -658,15 +662,14 @@
   W2 <- W[inds[2:(capM + 1L)], , drop = FALSE]
 
   gram <- crossprod(W)
-  c <- c0
-  for (i in seq_len(nc)) {
-    cd <- exp(-c * dist)
-    Oms[[i]] <- gram +
+  Oms <- lapply(.scpc_decay_grid(c0, cmax, cgridfac), function(decay) {
+    cd <- exp(-decay * dist)
+    omega <- gram +
       0.5 * (n * (n - 1) / capM) *
       (crossprod(W1, W2 * cd) + crossprod(W2, W1 * cd))
-    .check_sampled_covariance(Oms[[i]])
-    c <- c * cgridfac
-  }
+    .check_sampled_covariance(omega)
+    omega
+  })
 
   list(Oms = Oms, state = pairs$state)
 }

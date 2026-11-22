@@ -78,3 +78,31 @@ before cluster aggregation. Conditional IV uses the transpose of its oblique res
 maker, so identical instrument and regressor spaces reduce to OLS. These corrections
 apply to both native and fallback calculations and can change intervals and p-values
 from archived releases. `backend` and `nthreads` are independent options.
+
+Each interval covers a single coefficient under the corresponding SCPC
+assumptions. The correlation bound applies within the exponential benchmark,
+and the full-matrix method evaluates a finite decay grid.
+
+### IV inference
+
+The SCPC t-statistic for a 2SLS coefficient requires strong identification
+and the spatial score-process conditions in Müller & Watson (2023, §5.3).
+Conditional Gaussian size control requires the stated error model given
+the endogenous regressors, instruments, and exogenous controls. Instrument
+exogeneity alone is insufficient for that conditional claim. Where the
+unconditional argument applies, taking the larger critical value preserves
+its protection.
+
+For one endogenous regressor `p` and one excluded instrument `z`, Anderson–Rubin
+inference can be built from an SCPC test of the instrument coefficient in
+the regression of `y - b0 * p` on `z` and the exogenous controls. The example
+uses control `w` and coordinate columns `lon` and `lat` in `d`.
+
+```r
+b0 <- 0
+fit <- lm(I(y - b0 * p) ~ z + w, data = d)
+scpcR::scpc(fit, d, lon = "lon", lat = "lat")$scpcstats["z", "P>|t|"]
+```
+
+Retain the values of `b0` for which the instrument test fails to reject. The
+resulting confidence set may be disconnected or unbounded.

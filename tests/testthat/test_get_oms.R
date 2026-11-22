@@ -21,3 +21,20 @@ test_that("sampled covariance validation is scale invariant and accepts rank def
   }
   expect_identical(.scpc_score_sign(c(-1e-100, -0.0, 0, 1e-100)), c(-1, 1, 1, 1))
 })
+
+test_that("exact and sampled covariance grids include the finite endpoint", {
+  distmat <- matrix(c(0, 1, 1, 0), nrow = 2)
+  c0 <- 1
+  cmax <- 3.5
+  W <- diag(2)
+  exact <- .getOms(distmat, c0, cmax, W, 2)
+  sampled <- .lnget_Oms(
+    matrix(0:1), c0, cmax, W, 2,
+    pairs = list(indices = c(1L, 2L), dist = 1, state = 1)
+  )$Oms
+
+  expect_equal(exact, sampled)
+  expect_length(exact, 3L)
+  expect_equal(exact[[3L]][1L, 2L], exp(-cmax))
+  expect_identical(.scpc_decay_grid(2, 1, 2), c(2, 4))
+})

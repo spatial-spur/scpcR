@@ -195,6 +195,7 @@ test_that("within contrasts use the spacing and scale of their own group", {
   expect_equal(residuals[c(1,3,5)] / ulp, c(1,0,-1))
   expect_equal(residuals[c(2,4,6)] / tiny, c(-1,0,1))
   group <- factor(c(3,3,1), levels=1:3)
-  expect_equal(.normalize_cluster_direction(c(4,3,0), group), c(.8,.6,0))
+  expect_equal(.normalize_cluster_direction(c(4,3,0), group), c(.8,.6,1))
+  expect_equal(.normalize_cluster_direction(c(0,0,0), group), c(0,0,1))
   expect_equal(.cluster_l2_norms(c(4,3,0), group), c(0,0,5))
 })

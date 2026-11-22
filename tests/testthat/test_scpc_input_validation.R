@@ -105,6 +105,21 @@ test_that("GLM rejects non-Gaussian families and non-identity links", {
   }
 })
 
+test_that("nonlinear fixest fits are rejected before backend dispatch", {
+  set.seed(206)
+  n <- 60L
+  d <- data.frame(x = rnorm(n), s = runif(n), t = runif(n))
+  d$y <- rpois(n, exp(0.6 + 0.25 * d$x))
+  fits <- list(fixest::fepois(y ~ x, d), fixest::feglm(y ~ x, d, family = poisson()))
+  for (fit in fits) {
+    for (backend in c("auto", "rust", "fallback")) {
+      expect_error(scpc(fit, d, backend = backend, coords_euclidean = c("s", "t")), "feols")
+      expect_error(scpc(fit, d, backend = backend, coords_euclidean = c("s", "t"),
+                        uncond = TRUE), "feols")
+    }
+  }
+})
+
 test_that("fixest varying-slope FEs match explicit lm interactions and pure-FE models error cleanly", {
   skip_if_not_installed("fixest")
   set.seed(101)

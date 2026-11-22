@@ -53,11 +53,6 @@
   W
 }
 
-.gettau <- function(y, W) {
-  ## SCPC t-statistic
-  sqrt(ncol(W) - 1) * crossprod(W[, 1], y) / norm(crossprod(W[, -1], y), type = "2")
-}
-
 # ---------------------------------------------------------------------------
 # Residualisation helpers
 # ---------------------------------------------------------------------------
@@ -376,13 +371,6 @@
 # ---------------------------------------------------------------------------
 # Orthogonalisation helper (conditional SCPC)
 # ---------------------------------------------------------------------------
-.orthogonalize_W <- function(W, xj, xjs, model_mat, include_intercept = TRUE, fixef_id = NULL,
-                             design_within = FALSE) {
-  residualize <- .make_ols_residualizer(model_mat, include_intercept, fixef_id,
-                                       design_within = design_within)
-  .conditional_weights(W, xj, xjs, residualize)
-}
-
 .conditional_weights <- function(Wfin, xj, xjs, residualize) {
   if (length(xj) != nrow(Wfin)) {
     stop("Conditional projection received xj with an incompatible length.")
@@ -413,14 +401,6 @@
 # ---------------------------------------------------------------------------
 # Orthogonalisation helper (conditional SCPC, clustered)
 # ---------------------------------------------------------------------------
-.orthogonalize_W_cluster <- function(W, cl_vec, xj_indiv, model_mat_indiv,
-                                     include_intercept = TRUE, fixef_id = NULL,
-                                     design_within = FALSE) {
-  residualize <- .make_ols_residualizer(model_mat_indiv, include_intercept, fixef_id,
-                                       design_within = design_within)
-  .conditional_cluster_weights(W, cl_vec, xj_indiv, residualize)
-}
-
 .conditional_cluster_weights <- function(Wfin, cl_vec, xj_indiv, residualize,
                                          xjs_indiv = .normalize_cluster_direction(xj_indiv, cl_vec)) {
   nclust <- nrow(Wfin)

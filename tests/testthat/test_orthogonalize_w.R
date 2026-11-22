@@ -1,4 +1,4 @@
-test_that("orthogonalize_W leaves an already orthogonal basis unchanged", {
+test_that("conditional projection leaves an already orthogonal basis unchanged", {
   W <- matrix(
     c(1 / sqrt(2), 1 / sqrt(2),
       1 / sqrt(2), -1 / sqrt(2)),
@@ -8,9 +8,10 @@ test_that("orthogonalize_W leaves an already orthogonal basis unchanged", {
   xj <- c(1, 1)
   xjs <- c(1, 1)
   model_mat <- matrix(1, nrow = 2, ncol = 1)
+  residualize <- .make_ols_residualizer(model_mat, include_intercept = FALSE)
 
   expect_equal(
-    .orthogonalize_W(W, xj, xjs, model_mat, include_intercept = FALSE),
+    .conditional_weights(W, xj, xjs, residualize),
     W,
     tolerance = 1e-12
   )
@@ -56,12 +57,13 @@ test_that("cluster direction normalization handles 1e200 and 1e-200 without over
   X <- matrix(stats::rnorm(n * 2L), nrow = n, ncol = 2L)
   Z <- matrix(stats::rnorm(n * 2L), nrow = n, ncol = 2L) + 0.5 * X
   xj_base <- stats::rnorm(n)
+  ols_res <- .make_ols_residualizer(X)
   iv_res <- .make_iv_residualizer(X, Z, transpose = TRUE)
 
-  base_ols <- .orthogonalize_W_cluster(W, cl_vec, xj_base, X)
+  base_ols <- .conditional_cluster_weights(W, cl_vec, xj_base, ols_res)
   base_iv <- .conditional_cluster_weights(W, cl_vec, xj_base, iv_res)
   for (sc in c(1e200, 1e-200)) {
-    scaled_ols <- .orthogonalize_W_cluster(W, cl_vec, xj_base * sc, X)
+    scaled_ols <- .conditional_cluster_weights(W, cl_vec, xj_base * sc, ols_res)
     scaled_iv <- .conditional_cluster_weights(W, cl_vec, xj_base * sc, iv_res)
     expect_equal(scaled_ols / sc, base_ols, tolerance = 1e-12)
     expect_equal(scaled_iv / sc, base_iv, tolerance = 1e-12)

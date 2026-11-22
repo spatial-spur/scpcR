@@ -20,9 +20,6 @@ test_that("get_fixest_iv_design extracts aligned design matrices with exogenous 
     expect_equal(colnames(design$model_mat), names(stats::coef(fit)))
     expect_equal(colnames(design$X), c("(Intercept)", "w", "x"))
     expect_equal(colnames(design$Z), c("(Intercept)", "w", "z"))
-    expect_identical(design$coef_names, names(stats::coef(fit)))
-    expect_false(design$has_fixef)
-    expect_null(design$fixef_id)
   })
 })
 
@@ -47,7 +44,7 @@ test_that("get_fixest_iv_design handles intercept-plus-endogenous specifications
   })
 })
 
-test_that("get_fixest_iv_design retains fixed-effect identifiers", {
+test_that("get_fixest_iv_design excludes the absorbed intercept", {
   skip_if_not_installed("fixest")
 
   with_fixest_single_thread({
@@ -66,8 +63,6 @@ test_that("get_fixest_iv_design retains fixed-effect identifiers", {
     fit <- fixest::feols(y ~ w | fe | x ~ z, data = dat)
     design <- .get_fixest_iv_design(fit)
 
-    expect_true(design$has_fixef)
-    expect_false(is.null(design$fixef_id))
     expect_equal(colnames(design$model_mat), names(stats::coef(fit)))
     expect_equal(colnames(design$X), c("w", "x"))
     expect_equal(colnames(design$Z), c("w", "z"))
@@ -95,8 +90,8 @@ test_that("get_fixest_iv_design supports multi-way fixed effects", {
     fit <- fixest::feols(y ~ w | fe1 + fe2 | x ~ z, data = dat)
     design <- .get_fixest_iv_design(fit)
 
-    expect_true(design$has_fixef)
-    expect_length(design$fixef_id, 2L)
     expect_equal(colnames(design$model_mat), names(stats::coef(fit)))
+    expect_equal(colnames(design$X), c("w", "x"))
+    expect_equal(colnames(design$Z), c("w", "z"))
   })
 })

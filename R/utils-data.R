@@ -265,36 +265,7 @@
     stop("Fixest IV design extraction produced non-finite values.")
   }
 
-  list(
-    X = X,
-    Z = Z,
-    model_mat = model_mat,
-    coef_names = coef_names,
-    fixef_id = .get_fixest_fe_spec(model),
-    has_fixef = .has_fixest_fe(model)
-  )
-}
-
-.get_conditional_projection_setup <- function(model, model_mat, n, uncond) {
-  # The fitted model matrix already contains any intercept.
-  setup <- list(model_mat = as.matrix(model_mat), include_intercept = FALSE, fixef_id = NULL)
-  if (isTRUE(uncond) || !inherits(model, "fixest") || !.has_fixest_fe(model)) {
-    return(setup)
-  }
-
-  mm <- .align_scpc_model_matrix(
-    model_mat,
-    names(stats::coef(model)),
-    "Conditional projection model matrix"
-  )
-
-  if (nrow(mm) != n) {
-    stop("Internal error: fixest conditional regressors have incompatible row count.")
-  }
-
-  fe_spec <- .get_fixest_fe_spec(model)
-  mm <- .demean_for_scpc(mm, fe_spec, "fixest conditional regressors", drop_absorbed = TRUE)
-  list(model_mat = mm, include_intercept = FALSE, fixef_id = fe_spec)
+  list(X = X, Z = Z, model_mat = model_mat)
 }
 
 .resolve_coords_input <- function(data, obs_index, lon, lat, coords_euclidean) {

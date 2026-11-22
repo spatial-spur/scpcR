@@ -184,7 +184,7 @@ scpc <- function(model,
   raw_coef_names <- names(coef_vec)
   is_fixest_iv <- .is_fixest_iv_second_stage(model)
   iv_cond_design <- NULL
-  if (is_fixest_iv) {
+  if (is_fixest_iv && !uncond) {
     iv_cond_design <- .get_fixest_iv_design(model)
     model_mat <- iv_cond_design$model_mat
   } else {
@@ -270,7 +270,8 @@ scpc <- function(model,
     !inherits(model, "glm") &&
     (inherits(model, "lm") || inherits(model, "fixest")) &&
     k_use >= 1L
-  rust_loaded <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
+  rust_loaded <- !identical(backend_resolved, "fallback") &&
+    is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
   rust_forked <- rust_loaded && .scpc_accelerate_state()
 
   if (identical(backend_resolved, "rust")) {
@@ -299,7 +300,7 @@ scpc <- function(model,
     "unsupported_model"
   }
   native_tied <- FALSE
-  if (!identical(backend_resolved, "fallback") && rust_eligible && rust_loaded && !rust_forked) {
+  if (rust_eligible && rust_loaded && !rust_forked) {
     nthreads_resolved <- .resolve_scpc_nthreads(nthreads)
     rust_tied_fallback <- FALSE
     rust_res <- tryCatch(
@@ -356,15 +357,6 @@ scpc <- function(model,
   }
 
   if (!is.null(cluster)) S <- rowsum(S, cl_vec)
-  cond_include_intercept <- FALSE
-  model_mat_cond <- model_mat
-  if (!uncond && is_fixest_iv) {
-    model_mat_cond <- .demean_for_scpc(model_mat, cond_fixef_id, "fixest IV second-stage model matrix")
-  } else if (!uncond) {
-    setup <- .get_conditional_projection_setup(model, model_mat, n, uncond)
-    model_mat_cond <- setup$model_mat
-    cond_include_intercept <- setup$include_intercept
-  }
 
   ## 4. Spatial kernel (pure-R fallback, unconditional) ----------------------
   spc <- .setOmsWfin(
@@ -387,6 +379,13 @@ scpc <- function(model,
   # Clustered projectors act in observation order. Unclustered Nyström
   # weights use the sampled site ordering, including for fixed effects.
   if (!uncond) {
+    model_mat_cond <- model_mat
+    if (!is.null(cond_fixef_id)) {
+      model_mat_cond <- .demean_for_scpc(
+        model_mat, cond_fixef_id, "fixest conditional regressors",
+        drop_absorbed = !is_fixest_iv
+      )
+    }
     obs_order <- if (is.null(cluster)) perm else seq_len(n)
     fe_ordered <- .permute_fixef_id(cond_fixef_id, obs_order)
     residualize <- if (is_fixest_iv) {
@@ -394,8 +393,9 @@ scpc <- function(model,
                             iv_cond_design$Z[obs_order, , drop = FALSE],
                             fixef_id = fe_ordered, transpose = TRUE)
     } else {
+      # The fitted model matrix already contains any intercept.
       .make_ols_residualizer(model_mat_cond[obs_order, , drop = FALSE],
-                             include_intercept = cond_include_intercept,
+                             include_intercept = FALSE,
                              fixef_id = fe_ordered, design_within = TRUE)
     }
     if (!is.null(cluster)) {

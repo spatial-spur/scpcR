@@ -2,11 +2,6 @@
 # Spatial helpers
 # ---------------------------------------------------------------------------
 
-.getavc <- function(c, dist) {
-  ## Average pairwise correlation for exponential kernel parameter c
-  mean(exp(-c * dist))
-}
-
 .getdistmat <- function(S, latlong) {
   ## Distance matrix from coordinates.
   ## latlong = TRUE: haversine distances in units of pi * R_earth.

@@ -40,9 +40,3 @@ pub fn rust_run_model_scpc(
 pub fn rust_build_info() -> List {
     spatial_r::build_info_r()
 }
-
-extendr_module! {
-    mod scpcR;
-    fn rust_run_model_scpc;
-    fn rust_build_info;
-}

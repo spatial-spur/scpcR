@@ -6,14 +6,15 @@ manual_fixest_iv_conditional_reference <- function(model,
                                                    method = "exact",
                                                    large_n_seed = 1) {
   design <- .get_fixest_iv_design(model)
+  fixef_id <- .get_fixest_fe_spec(model)
 
   n <- nrow(data)
   coef_vec <- stats::coef(model)
   S <- sandwich::estfun(model)
   bread_inv <- sandwich::bread(model) / n
   model_mat <- design$model_mat
-  if (!is.null(design$fixef_id)) {
-    model_mat <- as.matrix(fixest::demean(model_mat, f = design$fixef_id, nthreads = 1L))
+  if (!is.null(fixef_id)) {
+    model_mat <- as.matrix(fixest::demean(model_mat, f = fixef_id, nthreads = 1L))
   }
   spc <- .setOmsWfin(
     as.matrix(data[, coord_cols, drop = FALSE]),
@@ -65,7 +66,7 @@ manual_fixest_iv_conditional_reference <- function(model,
       residualize <- .make_iv_residualizer(
         design$X[perm, , drop = FALSE],
         design$Z[perm, , drop = FALSE],
-        fixef_id = .permute_fixef_id(design$fixef_id, perm),
+        fixef_id = .permute_fixef_id(fixef_id, perm),
         transpose = TRUE
       )
       xj <- xj_raw[perm]
@@ -73,7 +74,7 @@ manual_fixest_iv_conditional_reference <- function(model,
       residualize <- .make_iv_residualizer(
         design$X,
         design$Z,
-        fixef_id = design$fixef_id,
+        fixef_id = fixef_id,
         transpose = TRUE
       )
       xj <- xj_raw

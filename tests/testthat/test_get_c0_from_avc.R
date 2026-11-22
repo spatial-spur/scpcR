@@ -6,5 +6,5 @@ test_that("getc0fromavc inverts the target average correlation", {
 
   expect_gt(c0, 0)
   expect_equal(c0, log(2), tolerance = 1e-3)
-  expect_lt(abs(.getavc(c0, dist) - avc0), 4e-4)
+  expect_lt(abs(mean(exp(-c0 * dist)) - avc0), 4e-4)
 })

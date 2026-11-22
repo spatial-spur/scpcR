@@ -65,8 +65,9 @@ Default is 0.03.}
 \item{method}{Character string selecting the spatial algorithm.
 \code{"auto"} chooses \code{"exact"} for smaller problems and
 \code{"approx"} once the large-\eqn{n} threshold is reached.
-\code{"exact"} uses the full distance matrix and a finite decay grid.
-\code{"approx"} uses the original large-\eqn{n} approximation branch.}
+\code{"exact"} uses the full distance matrix.
+\code{"approx"} samples location pairs in the large-\eqn{n} approximation.
+Both methods approximate worst-case calibration on a finite decay grid.}
 
 \item{large_n_seed}{Numeric; integer-valued seed used by the
 large-\eqn{n} approximation branch.  Ignored when

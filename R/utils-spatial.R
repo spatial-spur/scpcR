@@ -492,11 +492,13 @@
 }
 
 .normalize_s <- function(S, latlong) {
-  ## This follows the original Princeton large-n branch closely so the
-  ## approximation uses the same row order as the reference code.
   S <- as.matrix(S)
 
   if (!latlong) {
+    anchor <- 0.5 * apply(S, 2L, min) + 0.5 * apply(S, 2L, max)
+    S <- sweep(S, 2L, anchor, "-")
+    scale <- max(abs(S))
+    if (scale > 0) S <- S / scale
     S <- sweep(S, 2, colMeans(S), `-`)
     rot <- eigen(crossprod(S), symmetric = TRUE)$vectors
     S <- S %*% rot
@@ -597,7 +599,7 @@
   min_norm <- sqrt(.Machine$double.eps)
   for (i in seq_len(qmax)) {
     Wx <- Wall[, seq_len(capN * i), drop = FALSE]
-    evec <- eigen(crossprod(Wx), symmetric = TRUE)$vectors[, 1, drop = FALSE]
+    evec <- .leading_eigen(crossprod(Wx), 1L)$vectors[, 1L, drop = FALSE]
     W[, i] <- as.numeric(Wx %*% evec)
     norm_i <- sqrt(sum(W[, i]^2))
     if (!is.finite(norm_i) || norm_i <= min_norm) {

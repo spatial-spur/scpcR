@@ -271,8 +271,7 @@ scpc <- function(model,
     (inherits(model, "lm") || inherits(model, "fixest")) &&
     k_use >= 1L
   rust_loaded <- is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
-  rust_forked <- rust_loaded && .is_scpc_forked_child() &&
-    isTRUE(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$inherited_accelerate_state)
+  rust_forked <- rust_loaded && .scpc_accelerate_state()
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
@@ -579,6 +578,32 @@ scpc <- function(model,
 
 .scpc_runtime_env <- new.env(parent = emptyenv())
 .scpc_runtime_env$init_pid <- NULL
+.scpc_runtime_env$accelerate_pid <- NULL
+
+#' Internal Accelerate fork-state helper
+#'
+#' @param mark Logical; if `TRUE`, record the current process ID as having
+#'   initialized Apple Accelerate.
+#' @return Logical scalar; `TRUE` if Apple Accelerate was initialized in a
+#'   parent process before `fork()`.
+#' @keywords internal
+#' @export
+.scpc_accelerate_state <- function(mark = FALSE) {
+  if (isTRUE(mark) && is.null(.scpc_runtime_env$accelerate_pid)) {
+    .scpc_runtime_env$accelerate_pid <- Sys.getpid()
+  }
+  own <- is.loaded("wrap__rust_build_info", PACKAGE = "scpcR") &&
+    isTRUE(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$inherited_accelerate_state)
+  owner <- .scpc_runtime_env$accelerate_pid
+  own || (!is.null(owner) && !identical(owner, Sys.getpid()))
+}
+
+.mark_scpc_accelerate_used <- function() {
+  if (is.loaded("wrap__rust_build_info", PACKAGE = "scpcR") &&
+      identical(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$linalg_provider, "accelerate")) {
+    .scpc_accelerate_state(mark = TRUE)
+  }
+}
 
 .onLoad <- function(libname, pkgname) {
   .scpc_runtime_env$init_pid <- Sys.getpid()
@@ -639,6 +664,7 @@ scpc <- function(model,
     storage.mode(x) <- "double"
     x
   }
+  .mark_scpc_accelerate_used()
   res <- .Call(
     "wrap__rust_run_model_scpc", as_double_matrix(coords), isTRUE(latlong),
     as.double(avc), isTRUE(cvs), as.double(coef), as_double_matrix(scores),

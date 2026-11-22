@@ -285,12 +285,12 @@ scpc <- function(model,
     !inherits(model, "glm") &&
     k_use >= 1L
   rust_loaded <- !identical(backend_resolved, "fallback") &&
-    is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")
+    .scpc_rust_compatible()
   rust_forked <- rust_loaded && .scpc_accelerate_state()
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
-      stop("`backend = \"rust\"` was requested, but the native Rust backend is not loaded in `scpcR`.")
+      stop("`backend = \"rust\"` was requested, but a compatible native Rust backend is not loaded in `scpcR`. Rebuild with SCPC API 7 and methods spec 0.3.6 or newer.", call. = FALSE)
     }
     if (rust_forked) {
       stop("Accelerate was used before this process forked. Use a fresh process or backend = 'fallback'.",
@@ -613,15 +613,29 @@ scpc <- function(model,
   if (isTRUE(mark) && is.null(.scpc_runtime_env$accelerate_pid)) {
     .scpc_runtime_env$accelerate_pid <- Sys.getpid()
   }
-  own <- is.loaded("wrap__rust_build_info", PACKAGE = "scpcR") &&
-    isTRUE(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$inherited_accelerate_state)
+  own <- isTRUE(.scpc_build_info()$inherited_accelerate_state)
   owner <- .scpc_runtime_env$accelerate_pid
   own || (!is.null(owner) && !identical(owner, Sys.getpid()))
 }
 
+.scpc_build_info <- function() {
+  if (is.loaded("wrap__rust_build_info", PACKAGE = "scpcR")) {
+    .Call("wrap__rust_build_info", PACKAGE = "scpcR")
+  }
+}
+
+.scpc_rust_compatible <- function() {
+  if (!is.loaded("wrap__rust_run_model_scpc", PACKAGE = "scpcR")) {
+    return(FALSE)
+  }
+  info <- .scpc_build_info()
+  isTRUE(info$scpc_api_version == 7L &&
+    length(info$spec_version) == 1L &&
+    utils::compareVersion(info$spec_version, "0.3.6") >= 0L)
+}
+
 .mark_scpc_accelerate_used <- function() {
-  if (is.loaded("wrap__rust_build_info", PACKAGE = "scpcR") &&
-      identical(.Call("wrap__rust_build_info", PACKAGE = "scpcR")$linalg_provider, "accelerate")) {
+  if (identical(.scpc_build_info()$linalg_provider, "accelerate")) {
     .scpc_accelerate_state(mark = TRUE)
   }
 }

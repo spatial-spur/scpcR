@@ -290,7 +290,7 @@ scpc <- function(model,
 
   if (identical(backend_resolved, "rust")) {
     if (!rust_loaded) {
-      stop("`backend = \"rust\"` was requested, but a compatible native Rust backend is not loaded in `scpcR`. Rebuild with SCPC API 7 and methods spec 0.3.8 or newer.", call. = FALSE)
+      stop("`backend = \"rust\"` was requested, but a compatible native Rust backend is not loaded in `scpcR`. Rebuild with SCPC API 7 and methods spec 0.3.9 or newer.", call. = FALSE)
     }
     if (rust_forked) {
       stop("Accelerate was used before this process forked. Use a fresh process or backend = 'fallback'.",
@@ -631,7 +631,7 @@ scpc <- function(model,
   info <- .scpc_build_info()
   isTRUE(info$scpc_api_version == 7L &&
     length(info$spec_version) == 1L &&
-    utils::compareVersion(info$spec_version, "0.3.8") >= 0L)
+    utils::compareVersion(info$spec_version, "0.3.9") >= 0L)
 }
 
 .mark_scpc_accelerate_used <- function() {

@@ -569,6 +569,7 @@
   }
 
   floor_corr <- mean(distvec == 0)
+  if (avc0 <= floor_corr) stop(sprintf("Target correlation avc=%g must exceed the pooled landmark co-located-pair fraction %.6f.", avc0, floor_corr))
   minavc_eff <- floor_corr + (1 - floor_corr) * minavc
   c0 <- .getc0fromavc(distvec, avc0)
   cmax <- .getc0fromavc(distvec, minavc_eff)
@@ -743,6 +744,10 @@
     distmat <- .getdistmat(coords, latlong)
     distv <- .lvech(distmat)
     floor_corr <- mean(distv == 0)
+    if (avc0 <= floor_corr) {
+      sites <- sum(vapply(seq_len(nrow(distmat)), function(i) !any(distmat[i, seq_len(i - 1L)] == 0), logical(1L)))
+      stop(sprintf("Target correlation avc=%g must exceed the co-located-pair fraction %.6f (%d distinct locations).", avc0, floor_corr, sites))
+    }
     minavc_eff <- floor_corr + (1 - floor_corr) * minavc
     c0 <- .getc0fromavc(distv, avc0)
     cmax <- .getc0fromavc(distv, minavc_eff)
